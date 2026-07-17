@@ -706,9 +706,8 @@ __global__ void render_forward_remainder(
 }
 
 // Pair-parallel backward: one thread per gaussian-brick pair, each walking the up to
-// 4x4x4 voxels of its brick. The per-gaussian kernels below run one thread per
-// gaussian, which at typical scales (~9k gaussians) cannot fill the GPU; the pair list
-// is 30-60x larger and can.
+// 4x4x4 voxels of its brick. One thread per gaussian is only ~9k threads at typical
+// scales and starves the GPU; the pair list is 30-60x larger and fills it.
 //
 // Threads follow the brick-sorted pair order, so a warp works on one or two bricks and
 // nearly all per-voxel loads (point map, sample point, outputs, output gradients) hit
@@ -973,10 +972,18 @@ __global__ void reduce_backward_partials(
     }
 }
 
-// Per-gaussian backward for channel counts too large for the pair-parallel kernel's
-// partial buffers. One thread per gaussian, iterating its splat rect directly.
+// Warp-per-gaussian backward for channel counts too large for the pair-parallel
+// kernel's partial buffers. The 32 lanes of each warp split the channel dimension
+// (lane l owns channels l, l + 32, ...), so the per-channel accumulators stay in
+// registers for any templated channel count, where a one-thread-per-gaussian version
+// would spill them to local memory. The cross-channel sums feeding prob_grad and
+// opa_grad become warp reductions; the rest of the per-voxel math is computed
+// redundantly -- and identically -- in every lane, so all lane-uniform branches stay
+// warp-uniform and the reductions are safe. One warp per gaussian also runs 32x the
+// threads of one thread per gaussian, which at typical scales (~9k gaussians) is the
+// difference between starving the GPU and filling it.
 template <typename index_t, typename float_t, typename data_t, int NUM_CHANNELS>
-__global__ void render_backward_registers(
+__global__ void render_backward_warps(
     index_t const num_gaussians,
     index_t const num_channels, // actual channel count (must be <= NUM_CHANNELS)
     index_t const* __restrict__ gaussian_cells,
@@ -1002,7 +1009,16 @@ __global__ void render_backward_registers(
     float_t* __restrict__ g_opacities_grad,
     data_t* __restrict__ g_semantics_grad)
 {
-    CUDA_1D_KERNEL_LOOP(idx, num_gaussians) {
+    constexpr int channels_per_lane = (NUM_CHANNELS + C10_WARP_SIZE - 1) / C10_WARP_SIZE;
+
+    auto const warp = cooperative_groups::tiled_partition<C10_WARP_SIZE>(
+        cooperative_groups::this_thread_block());
+
+    index_t const thread_id = ((index_t) blockIdx.x) * blockDim.x + threadIdx.x;
+    index_t const num_warps = (blockDim.x * gridDim.x) / C10_WARP_SIZE;
+    index_t const lane = thread_id % C10_WARP_SIZE;
+
+    for (index_t idx = thread_id / C10_WARP_SIZE; idx < num_gaussians; idx += num_warps) {
         auto const mean = math::vec3<float_t>::load(gaussian_means + 3 * idx);
         auto const cov = math::smat3<float_t>::load(gaussian_icovs + 6 * idx);
         auto const deter = gaussian_idets[idx];
@@ -1013,13 +1029,15 @@ __global__ void render_backward_registers(
 
         auto const sem_base = idx * num_channels;
 
-        data_t sem[NUM_CHANNELS];
-        data_t semantic_grad[NUM_CHANNELS];
+        data_t sem[channels_per_lane];
+        data_t semantic_grad[channels_per_lane];
 
-        for (int j = 0; j < num_channels; j++)
+        #pragma unroll
+        for (int k = 0; k < channels_per_lane; k++)
         {
-            sem[j] = gaussian_semantics[sem_base + j];
-            semantic_grad[j] = data_t{0};
+            index_t const ch = lane + k * C10_WARP_SIZE;
+            sem[k] = ch < num_channels ? gaussian_semantics[sem_base + ch] : data_t{0};
+            semantic_grad[k] = data_t{0};
         }
 
         float_t means_grad[3] = {0};
@@ -1055,31 +1073,28 @@ __global__ void render_backward_registers(
 
                     auto const out_sem_base = pts_idx * num_channels;
 
-                    // unroll if small enough
-                    if (num_channels <= 32) {
-                        #pragma unroll
-                        for (int ch = 0; ch < NUM_CHANNELS; ch++)
-                        {
-                            if (ch < num_channels) {
-                                data_t const logit_grad_ch = out_semantics_grad[out_sem_base + ch];
-                                data_t const sem_diff = sem[ch] - out_semantics[out_sem_base + ch];
+                    float_t lane_sum = 0.;
 
-                                semantic_grad[ch] += logit_grad_ch * static_cast<data_t>(prob_opa_inv);
-                                prob_grad += static_cast<float_t>(logit_grad_ch * sem_diff) * opa_inv;
-                                opa_grad += static_cast<float_t>(logit_grad_ch * sem_diff) * prob_inv;
-                            }
-                        }
-                    } else {
-                        for (int ch = 0; ch < num_channels; ch++)
-                        {
+                    #pragma unroll
+                    for (int k = 0; k < channels_per_lane; k++)
+                    {
+                        index_t const ch = lane + k * C10_WARP_SIZE;
+                        if (ch < num_channels) {
                             data_t const logit_grad_ch = out_semantics_grad[out_sem_base + ch];
-                            data_t const sem_diff = sem[ch] - out_semantics[out_sem_base + ch];
+                            data_t const sem_diff = sem[k] - out_semantics[out_sem_base + ch];
 
-                            semantic_grad[ch] += logit_grad_ch * static_cast<data_t>(prob_opa_inv);
-                            prob_grad += static_cast<float_t>(logit_grad_ch * sem_diff) * opa_inv;
-                            opa_grad += static_cast<float_t>(logit_grad_ch * sem_diff) * prob_inv;
+                            semantic_grad[k] += logit_grad_ch * static_cast<data_t>(prob_opa_inv);
+                            lane_sum += static_cast<float_t>(logit_grad_ch * sem_diff);
                         }
                     }
+
+                    // Sum of logit_grad * sem_diff over all channels; identical on
+                    // every lane afterwards, so prob_grad and opa_grad stay uniform.
+                    float_t const sem_diff_sum = cooperative_groups::reduce(
+                        warp, lane_sum, cooperative_groups::plus<float_t>());
+
+                    prob_grad += sem_diff_sum * opa_inv;
+                    opa_grad += sem_diff_sum * prob_inv;
                 }
                 // Note: prob here is denom * power, without opacity; the semantic path folds
                 // opacity in separately via prob_opa_inv / opa_inv / prob_inv above.
@@ -1129,34 +1144,34 @@ __global__ void render_backward_registers(
             }
         }
 
-        auto const p_mean_grad = g_means_grad + idx * 3;
-        p_mean_grad[0] = means_grad[0];
-        p_mean_grad[1] = means_grad[1];
-        p_mean_grad[2] = means_grad[2];
+        // The geometry gradients were accumulated identically in every lane; the
+        // semantic gradients are partitioned, so each lane writes its own channels.
+        if (lane == 0) {
+            auto const p_mean_grad = g_means_grad + idx * 3;
+            p_mean_grad[0] = means_grad[0];
+            p_mean_grad[1] = means_grad[1];
+            p_mean_grad[2] = means_grad[2];
 
-        auto const p_cov_grad = g_icov_grad + idx * 6;
-        p_cov_grad[0] = cov_grad[0];
-        p_cov_grad[1] = cov_grad[1];
-        p_cov_grad[2] = cov_grad[2];
-        p_cov_grad[3] = cov_grad[3];
-        p_cov_grad[4] = cov_grad[4];
-        p_cov_grad[5] = cov_grad[5];
+            auto const p_cov_grad = g_icov_grad + idx * 6;
+            p_cov_grad[0] = cov_grad[0];
+            p_cov_grad[1] = cov_grad[1];
+            p_cov_grad[2] = cov_grad[2];
+            p_cov_grad[3] = cov_grad[3];
+            p_cov_grad[4] = cov_grad[4];
+            p_cov_grad[5] = cov_grad[5];
 
-        g_idets_grad[idx] = idets_grad;
-        g_opacities_grad[idx] = opa_grad;
+            g_idets_grad[idx] = idets_grad;
+            g_opacities_grad[idx] = opa_grad;
+        }
 
         auto const p_sem_grad = g_semantics_grad + idx * num_channels;
 
-        if (num_channels <= 32) {
-            #pragma unroll
-            for (int j = 0; j < NUM_CHANNELS; j++) {
-                if (j < num_channels) {
-                    p_sem_grad[j] = semantic_grad[j];
-                }
-            }
-        } else {
-            for (int j = 0; j < num_channels; j++) {
-                p_sem_grad[j] = semantic_grad[j];
+        #pragma unroll
+        for (int k = 0; k < channels_per_lane; k++)
+        {
+            index_t const ch = lane + k * C10_WARP_SIZE;
+            if (ch < num_channels) {
+                p_sem_grad[ch] = semantic_grad[k];
             }
         }
     }
@@ -1325,11 +1340,16 @@ struct ChannelList {};
 using CommonChannels = ChannelList<8, 16, 17, 18, 32, 64, 128, 256>;
 
 // The pair-parallel backward keeps per-pair partial gradients, whose footprint scales
-// with the channel count; beyond this limit the per-gaussian backward runs instead.
-constexpr int pair_backward_channel_limit = 32;
+// with both the pair count and the channel count (~72 MB at 9k gaussians and 64
+// channels); beyond this limit the warp-per-gaussian backward runs instead, which
+// needs no partial buffers, and past the largest templated count the
+// one-thread-per-gaussian global-memory fallback. Measured on an RTX 4060 Ti, the
+// pair path was still 1.4x the warp path at 128 channels, but doubling this limit
+// again was not worth doubling the buffers.
+constexpr int pair_backward_channel_limit = 64;
 
-using PairBackwardChannels = ChannelList<8, 16, 17, 18, 32>;
-using LargeBackwardChannels = ChannelList<64, 128, 256>;
+using PairBackwardChannels = ChannelList<8, 16, 17, 18, 32, 64>;
+using LargeBackwardChannels = ChannelList<128, 256>;
 
 template<typename ChannelListType>
 struct Last {};
@@ -1410,19 +1430,19 @@ struct PairBackwardKernelWrapper {
     }
 };
 
-// Kernel wrapper for the per-gaussian backward pass
+// Kernel wrapper for the warp-per-gaussian backward pass (the dispatch below guards
+// with last<LargeBackwardChannels>(), so the global fallback is unreachable).
 template<typename index_t, typename float_t, typename data_t>
-struct BackwardKernelWrapper {
+struct WarpBackwardKernelWrapper {
     template<int N, typename... Args>
     static void launch_register(dim3 blocks, dim3 threads, c10::cuda::CUDAStream const& stream, Args&&... args) {
-        kernel::render_backward_registers<index_t, float_t, data_t, N><<<blocks, threads, 0, stream>>>(
+        kernel::render_backward_warps<index_t, float_t, data_t, N><<<blocks, threads, 0, stream>>>(
             std::forward<Args>(args)...);
     }
 
     template<typename... Args>
-    static void launch_global(dim3 blocks, dim3 threads, c10::cuda::CUDAStream const& stream, Args&&... args) {
-        kernel::render_backward_global_memory<index_t, float_t, data_t><<<blocks, threads, 0, stream>>>(
-            std::forward<Args>(args)...);
+    static void launch_global(dim3, dim3, c10::cuda::CUDAStream const&, Args&&...) {
+        TORCH_INTERNAL_ASSERT(false, "warp backward dispatched beyond its channel limit");
     }
 };
 
@@ -1833,17 +1853,11 @@ render_backward(
         }
 
         profiler.mark("bwd_reduce");
-    } else {
-        auto const threads = [&]{
-            if (num_channels <= 128)
-                return 256;
-            if (num_channels <= last<CommonChannels>())
-                return 128;
-            return 512;
-        }();
-        auto const blocks = (num_gaussians + threads - 1) / threads;
+    } else if (num_channels <= last<LargeBackwardChannels>()) {
+        auto const threads = 256;
+        auto const blocks = (num_gaussians * at::cuda::warp_size() + threads - 1) / threads;
 
-        dispatch_kernel<BackwardKernelWrapper<index_t, float_t, data_t>, LargeBackwardChannels>(
+        dispatch_kernel<WarpBackwardKernelWrapper<index_t, float_t, data_t>, LargeBackwardChannels>(
             static_cast<int>(num_channels), blocks, threads, stream,
             static_cast<index_t>(num_gaussians),
             static_cast<index_t>(num_channels),
@@ -1869,6 +1883,38 @@ render_backward(
             idets_grad.template mutable_data_ptr<float_t>(),
             opacities_grad.template mutable_data_ptr<float_t>(),
             semantics_grad.template mutable_data_ptr<data_t>());
+
+        profiler.mark("bwd_render");
+    } else {
+        auto const threads = 512;
+        auto const blocks = (num_gaussians + threads - 1) / threads;
+
+        kernel::render_backward_global_memory<index_t, float_t, data_t><<<blocks, threads, 0, stream>>>(
+            static_cast<index_t>(num_gaussians),
+            static_cast<index_t>(num_channels),
+            gaussian_cells.template const_data_ptr<index_t>(),
+            gaussian_radii.template const_data_ptr<index_t>(),
+            voxel_to_point.template const_data_ptr<index_t>(),
+            sample_points.template const_data_ptr<float_t>(),
+            gaussian_means.template const_data_ptr<float_t>(),
+            gaussian_icovs.template const_data_ptr<float_t>(),
+            gaussian_idets.template const_data_ptr<float_t>(),
+            gaussian_opacities.template const_data_ptr<float_t>(),
+            gaussian_semantics.template const_data_ptr<data_t>(),
+            out_semantics.template const_data_ptr<data_t>(),
+            out_occupancy.template const_data_ptr<float_t>(),
+            out_probability.template const_data_ptr<float_t>(),
+            out_semantics_grad.template const_data_ptr<data_t>(),
+            out_occupancy_grad.template const_data_ptr<float_t>(),
+            out_density_grad.template const_data_ptr<float_t>(),
+            grid_size,
+            opacity_weighted,
+            means_grad.template mutable_data_ptr<float_t>(),
+            icov_grad.template mutable_data_ptr<float_t>(),
+            idets_grad.template mutable_data_ptr<float_t>(),
+            opacities_grad.template mutable_data_ptr<float_t>(),
+            semantics_grad.template mutable_data_ptr<data_t>());
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
 
         profiler.mark("bwd_render");
     }
