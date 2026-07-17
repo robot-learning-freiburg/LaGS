@@ -14,6 +14,8 @@ namespace vsplat3d
             torch::Tensor,
             torch::Tensor,
             torch::Tensor,
+            torch::Tensor,
+            torch::Tensor,
             torch::Tensor>
         aggregate_forward(
             const torch::Tensor &sample_points,
@@ -33,8 +35,12 @@ namespace vsplat3d
 
         std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
         agregate_backward(
-            const torch::Tensor &voxel_offsets,
-            const torch::Tensor &voxel_indices,
+            const torch::Tensor &pair_offsets,
+            const torch::Tensor &pair_gaussians,
+            const torch::Tensor &pair_bricks,
+            const torch::Tensor &pair_order,
+            const torch::Tensor &gaussian_means_int,
+            const torch::Tensor &gaussian_radii,
             const torch::Tensor &sample_points_int,
             const torch::Tensor &sample_points,
             const torch::Tensor &gaussian_means,

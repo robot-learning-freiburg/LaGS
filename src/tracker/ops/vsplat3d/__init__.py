@@ -151,8 +151,10 @@ class _AggregateFn(torch.autograd.Function):
             out_occupancy,
             out_density,
             out_prob_sum,
-            voxel_offsets,
-            voxel_indices,
+            pair_offsets,
+            pair_gaussians,
+            pair_bricks,
+            pair_order,
         ) = _aggregate_forward(
             sample_points,
             gaussian_means,
@@ -179,8 +181,12 @@ class _AggregateFn(torch.autograd.Function):
         ctx.empty = False
 
         ctx.save_for_backward(
-            voxel_offsets,
-            voxel_indices,
+            pair_offsets,
+            pair_gaussians,
+            pair_bricks,
+            pair_order,
+            gaussian_means_int,
+            gaussian_radii,
             sample_points_int,
             sample_points,
             gaussian_means,
@@ -240,8 +246,12 @@ class _AggregateFn(torch.autograd.Function):
         active_idx = ctx.active_idx
 
         (
-            voxel_offsets,
-            voxel_indices,
+            pair_offsets,
+            pair_gaussians,
+            pair_bricks,
+            pair_order,
+            gaussian_means_int,
+            gaussian_radii,
             sample_points_int,
             sample_points,
             gaussian_means,
@@ -261,8 +271,12 @@ class _AggregateFn(torch.autograd.Function):
             opacities_grad,
             semantics_grad,
         ) = _aggregate_backward(
-            voxel_offsets,
-            voxel_indices,
+            pair_offsets,
+            pair_gaussians,
+            pair_bricks,
+            pair_order,
+            gaussian_means_int,
+            gaussian_radii,
             sample_points_int,
             sample_points,
             gaussian_means,
