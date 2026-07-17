@@ -432,6 +432,138 @@ def test_forward_matches_impl_reference(opacity_weighted):
     torch.testing.assert_close(k_mass[0], mass, rtol=1e-4, atol=1e-5)
 
 
+@requires_cuda
+@pytest.mark.parametrize("opacity_weighted", [True, False])
+def test_grid_not_divisible_by_brick_edge(opacity_weighted):
+    """Forward and backward on a grid that is no multiple of the 4-voxel brick edge.
+
+    The kernel groups voxels into 4x4x4 bricks, so grids like this one leave bricks
+    overhanging the grid on every axis; those out-of-grid voxels must be skipped both
+    when rendering and when accumulating gradients.
+    """
+    # pylint: disable=too-many-locals
+    scene = _make_scene(num_gaussians=30, grid_size=(13, 11, 6), num_channels=18)
+
+    sem, occ, density, prob_sum = _call_kernel(scene, opacity_weighted)
+    ref_sem, ref_occ, ref_density, ref_prob_sum = _dense_reference(
+        scene, opacity_weighted
+    )
+
+    torch.testing.assert_close(sem[0], ref_sem, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(occ[0], ref_occ, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(density[0], ref_density, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(prob_sum[0], ref_prob_sum, rtol=1e-4, atol=1e-5)
+
+    gen = torch.Generator(device="cuda").manual_seed(17)
+    n_pts = scene["sample_points"].shape[0]
+    n_ch = scene["semantics"].shape[1]
+
+    grad_sem = torch.randn(n_pts, n_ch, generator=gen, device="cuda")
+    grad_occ = torch.randn(n_pts, generator=gen, device="cuda")
+    grad_density = torch.randn(n_pts, generator=gen, device="cuda")
+
+    names = ["means", "icovs", "idets", "opacities", "semantics"]
+
+    def run(fn, batched):
+        scn = dict(scene)
+        for name in names:
+            scn[name] = scene[name].clone().requires_grad_(True)
+        outs = fn(scn)
+        outs = [o[0] for o in outs] if batched else outs
+        return _grads(
+            outs[:3], [scn[n] for n in names], [grad_sem, grad_occ, grad_density]
+        )
+
+    kernel_grads = run(lambda s: _call_kernel(s, opacity_weighted), batched=True)
+    ref_grads = run(lambda s: _dense_reference(s, opacity_weighted), batched=False)
+
+    for name, got, want in zip(names, kernel_grads, ref_grads):
+        torch.testing.assert_close(
+            got, want, rtol=2e-3, atol=1e-5, msg=lambda m, n=name: f"{n} grad:\n{m}"
+        )
+
+
+@requires_cuda
+@pytest.mark.parametrize("num_channels", [33, 64, 300])
+@pytest.mark.parametrize("opacity_weighted", [True, False])
+def test_large_channel_counts(num_channels, opacity_weighted):
+    """Forward and backward beyond the 32-channel pair-parallel backward limit.
+
+    The other tests all use <= 32 channels, so without this the warp-per-gaussian
+    backward (33..256 channels; 33 exercises its partially-filled last lane pass, 64 a
+    full one) and the global-memory fallbacks past the largest templated channel count
+    (300) would be untested.
+    """
+    # pylint: disable=too-many-locals
+    scene = _make_scene(
+        num_gaussians=30, grid_size=(16, 16, 8), num_channels=num_channels
+    )
+
+    sem, occ, density, prob_sum = _call_kernel(scene, opacity_weighted)
+    ref_sem, ref_occ, ref_density, ref_prob_sum = _dense_reference(
+        scene, opacity_weighted
+    )
+
+    torch.testing.assert_close(sem[0], ref_sem, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(occ[0], ref_occ, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(density[0], ref_density, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(prob_sum[0], ref_prob_sum, rtol=1e-4, atol=1e-5)
+
+    gen = torch.Generator(device="cuda").manual_seed(19)
+    n_pts = scene["sample_points"].shape[0]
+
+    grad_sem = torch.randn(n_pts, num_channels, generator=gen, device="cuda")
+    grad_occ = torch.randn(n_pts, generator=gen, device="cuda")
+    grad_density = torch.randn(n_pts, generator=gen, device="cuda")
+
+    names = ["means", "icovs", "idets", "opacities", "semantics"]
+
+    def run(fn, batched):
+        scn = dict(scene)
+        for name in names:
+            scn[name] = scene[name].clone().requires_grad_(True)
+        outs = fn(scn)
+        outs = [o[0] for o in outs] if batched else outs
+        return _grads(
+            outs[:3], [scn[n] for n in names], [grad_sem, grad_occ, grad_density]
+        )
+
+    kernel_grads = run(lambda s: _call_kernel(s, opacity_weighted), batched=True)
+    ref_grads = run(lambda s: _dense_reference(s, opacity_weighted), batched=False)
+
+    for name, got, want in zip(names, kernel_grads, ref_grads):
+        torch.testing.assert_close(
+            got, want, rtol=2e-3, atol=1e-5, msg=lambda m, n=name: f"{n} grad:\n{m}"
+        )
+
+
+@requires_cuda
+def test_forward_multiple_sample_points_per_voxel():
+    """Several sample points sharing a voxel must each be rendered at their own
+    coordinates.
+
+    The bricked render maps each voxel to at most one sample point; points that lose
+    that mapping go through a separate remainder pass, which this exercises. (The
+    backward has always kept only one point per voxel -- see compute_voxel_to_point_map
+    -- so only the forward is compared here.)
+    """
+    scene = _make_scene(num_gaussians=50, grid_size=(16, 16, 8), num_channels=18)
+
+    # Duplicate some voxels' sample points at a different position inside the voxel, so
+    # the duplicates must produce genuinely different outputs.
+    voxel_size_t = torch.tensor(VOXEL_SIZE, device=scene["sample_points"].device)
+    extra = scene["sample_points"][:100] + 0.21 * voxel_size_t
+    scene["sample_points"] = torch.cat([scene["sample_points"], extra], dim=0)
+
+    sem, occ, density, prob_sum = _call_kernel(scene, opacity_weighted=False)
+    ref_sem, ref_occ, ref_density, ref_prob_sum = _dense_reference(scene, False)
+
+    torch.testing.assert_close(sem[0], ref_sem, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(occ[0], ref_occ, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(density[0], ref_density, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(prob_sum[0], ref_prob_sum, rtol=1e-4, atol=1e-5)
+
+
 # Finite-difference step per input, chosen relative to that input's magnitude.
 #
 # The kernel calls __expf/__fsqrt_rn, so its internals run at float precision (~1e-6
