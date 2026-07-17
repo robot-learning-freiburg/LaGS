@@ -176,6 +176,7 @@ __global__ void render_forward_registers(
     index_t const* __restrict__ gaussian_indices,
     math::vec3<index_t> const grid_size,
     data_t default_value,
+    bool const opacity_weighted,
     data_t* __restrict__ out_semantics,
     float_t* __restrict__ out_occupancy,
     float_t* __restrict__ out_density,
@@ -215,6 +216,11 @@ __global__ void render_forward_registers(
             auto const denom = static_cast<float_t>(gauss_denom_pi) * __fsqrt_rn(deter);
             auto const prob = opacity * denom * power;
 
+            // Opacity-weighted geometry: alpha = a * exp(-1/2 (x-m)^T S^-1 (x-m)).
+            // Without the weighting, occupancy cannot see opacity at all, so the only
+            // way to suppress a gaussian is to move/shrink it.
+            auto const alpha = opacity_weighted ? opacity * power : power;
+
             auto const sem_base = gs_idx * num_channels;
 
             // unroll if small enough
@@ -231,8 +237,8 @@ __global__ void render_forward_registers(
                 }
             }
 
-            occupancy = (1 - power) * occupancy;
-            density = power + density;
+            occupancy = (1 - alpha) * occupancy;
+            density = alpha + density;
             prob_sum = prob + prob_sum;
         }
 
@@ -274,6 +280,7 @@ __global__ void render_forward_global_memory(
     index_t const* __restrict__ gaussian_indices,
     math::vec3<index_t> const grid_size,
     data_t default_value,
+    bool const opacity_weighted,
     data_t* __restrict__ out_semantics,
     float_t* __restrict__ out_occupancy,
     float_t* __restrict__ out_density,
@@ -313,14 +320,17 @@ __global__ void render_forward_global_memory(
             auto const denom = static_cast<float_t>(gauss_denom_pi) * __fsqrt_rn(deter);
             auto const prob = opacity * denom * power;
 
+            // See render_forward_registers for the rationale.
+            auto const alpha = opacity_weighted ? opacity * power : power;
+
             auto const sem_base = gs_idx * num_channels;
 
             for (int j = 0; j < num_channels; j++) {
                 out_sem[j] += gaussian_semantics[sem_base + j] * static_cast<data_t>(prob);
             }
 
-            occupancy = (1 - power) * occupancy;
-            density = power + density;
+            occupancy = (1 - alpha) * occupancy;
+            density = alpha + density;
             prob_sum = prob + prob_sum;
         }
 
@@ -355,6 +365,7 @@ __global__ void render_backward_registers(
     data_t const* __restrict__ out_semantics_grad,
     float_t const* __restrict__ out_occupancy_grad,
     float_t const* __restrict__ out_density_grad,
+    bool const opacity_weighted,
     float_t* __restrict__ g_means_grad,
     float_t* __restrict__ g_icov_grad,
     float_t* __restrict__ g_idets_grad,
@@ -438,9 +449,31 @@ __global__ void render_backward_registers(
                         }
                     }
                 }
+                // Note: prob here is denom * power, without opacity; the semantic path folds
+                // opacity in separately via prob_opa_inv / opa_inv / prob_inv above.
                 power_grad += prob_grad * denom;
-                power_grad += (1 - out_occupancy[pts_idx]) / (1 - power + epsilon<float_t>) * out_occupancy_grad[pts_idx];
-                power_grad += out_density_grad[pts_idx];
+
+                // Opacity-weighted geometry: alpha = a * power. Occupancy and density both
+                // act on alpha, and alpha depends on both power and opacity, so the chain
+                // rule forks here.
+                //
+                // This sits outside the prob_sum guard above on purpose: occupancy does not
+                // depend on prob_sum, so a gaussian over a point with no probability mass
+                // must still receive occupancy gradient.
+                auto const alpha = opacity_weighted ? opa * power : power;
+
+                float_t alpha_grad = 0.;
+                alpha_grad += (1 - out_occupancy[pts_idx]) / (1 - alpha + epsilon<float_t>)
+                    * out_occupancy_grad[pts_idx];
+                alpha_grad += out_density_grad[pts_idx];
+
+                if (opacity_weighted) {
+                    power_grad += alpha_grad * opa;     // d(alpha)/d(power) = a
+                    opa_grad += alpha_grad * power;     // d(alpha)/d(a) = power
+                } else {
+                    power_grad += alpha_grad;
+                }
+
                 deter_grad += prob_grad * prob / 2 / deter;
                 idets_grad += deter_grad;
 
@@ -517,6 +550,7 @@ __global__ void render_backward_global_memory(
     data_t const* __restrict__ out_semantics_grad,
     float_t const* __restrict__ out_occupancy_grad,
     float_t const* __restrict__ out_density_grad,
+    bool const opacity_weighted,
     float_t* __restrict__ g_means_grad,
     float_t* __restrict__ g_icov_grad,
     float_t* __restrict__ g_idets_grad,
@@ -581,9 +615,31 @@ __global__ void render_backward_global_memory(
                         opa_grad += static_cast<float_t>(logit_grad_ch * sem_diff) * prob_inv;
                     }
                 }
+                // Note: prob here is denom * power, without opacity; the semantic path folds
+                // opacity in separately via prob_opa_inv / opa_inv / prob_inv above.
                 power_grad += prob_grad * denom;
-                power_grad += (1 - out_occupancy[pts_idx]) / (1 - power + epsilon<float_t>) * out_occupancy_grad[pts_idx];
-                power_grad += out_density_grad[pts_idx];
+
+                // Opacity-weighted geometry: alpha = a * power. Occupancy and density both
+                // act on alpha, and alpha depends on both power and opacity, so the chain
+                // rule forks here.
+                //
+                // This sits outside the prob_sum guard above on purpose: occupancy does not
+                // depend on prob_sum, so a gaussian over a point with no probability mass
+                // must still receive occupancy gradient.
+                auto const alpha = opacity_weighted ? opa * power : power;
+
+                float_t alpha_grad = 0.;
+                alpha_grad += (1 - out_occupancy[pts_idx]) / (1 - alpha + epsilon<float_t>)
+                    * out_occupancy_grad[pts_idx];
+                alpha_grad += out_density_grad[pts_idx];
+
+                if (opacity_weighted) {
+                    power_grad += alpha_grad * opa;     // d(alpha)/d(power) = a
+                    opa_grad += alpha_grad * power;     // d(alpha)/d(a) = power
+                } else {
+                    power_grad += alpha_grad;
+                }
+
                 deter_grad += prob_grad * prob / 2 / deter;
                 idets_grad += deter_grad;
 
@@ -892,6 +948,7 @@ render_forward(
     at::Tensor const& gaussian_indices,
     math::vec3<index_t> const& grid_size,
     data_t default_value,
+    bool const opacity_weighted,
     c10::cuda::CUDAStream const& stream)
 {
     auto const num_samples = static_cast<index_t>(sample_points.size(0));
@@ -936,6 +993,7 @@ render_forward(
         gaussian_indices.template const_data_ptr<index_t>(),
         grid_size,
         default_value,
+        opacity_weighted,
         out_semantics.template mutable_data_ptr<data_t>(),
         out_occupancy.template mutable_data_ptr<float_t>(),
         out_density.template mutable_data_ptr<float_t>(),
@@ -962,6 +1020,7 @@ render_backward(
     at::Tensor const& out_semantics_grad,
     at::Tensor const& out_occupancy_grad,
     at::Tensor const& out_density_grad,
+    bool const opacity_weighted,
     c10::cuda::CUDAStream const& stream)
 {
     auto const num_samples = sample_points.size(0);
@@ -1012,6 +1071,7 @@ render_backward(
         out_semantics_grad.template const_data_ptr<data_t>(),
         out_occupancy_grad.template const_data_ptr<float_t>(),
         out_density_grad.template const_data_ptr<float_t>(),
+        opacity_weighted,
         means_grad.template mutable_data_ptr<float_t>(),
         icov_grad.template mutable_data_ptr<float_t>(),
         idets_grad.template mutable_data_ptr<float_t>(),
@@ -1035,6 +1095,7 @@ aggregate_forward(
     at::Tensor const& gaussian_radii,
     math::vec3<index_t> const& grid_size,
     data_t default_value,
+    bool const opacity_weighted,
     c10::cuda::CUDAStream const& stream)
 {
     auto voxel_offsets = compute_gaussian_voxel_offsets<index_t>(
@@ -1081,6 +1142,7 @@ aggregate_forward(
         gaussian_indices,
         grid_size,
         default_value,
+        opacity_weighted,
         stream);
 
     return {
@@ -1112,6 +1174,7 @@ aggregate_backward(
     at::Tensor const& out_occupancy_grad,
     at::Tensor const& out_density_grad,
     math::vec3<index_t> const& grid_size,
+    bool const opacity_weighted,
     c10::cuda::CUDAStream const& stream)
 {
     auto const voxel_to_points = compute_voxel_to_point_map<index_t>(
@@ -1133,6 +1196,7 @@ aggregate_backward(
         out_semantics_grad,
         out_occupancy_grad,
         out_density_grad,
+        opacity_weighted,
         stream);
 }
 
@@ -1153,7 +1217,8 @@ aggregate_forward(
     int64_t const h,
     int64_t const w,
     int64_t const d,
-    double const default_value)
+    double const default_value,
+    bool const opacity_weighted)
 {
     CHECK_CUDA(sample_points);
     CHECK_CUDA(gaussian_means);
@@ -1202,6 +1267,7 @@ aggregate_forward(
                     gaussian_radii,
                     grid_size,
                     static_cast<data_t>(default_value),
+                    opacity_weighted,
                     at::cuda::getCurrentCUDAStream());
             }));
         }));
@@ -1227,7 +1293,8 @@ agregate_backward(
     at::Tensor const& out_density_grad,
     int64_t const h,
     int64_t const w,
-    int64_t const d)
+    int64_t const d,
+    bool const opacity_weighted)
 {
     CHECK_CUDA(voxel_offsets);
     CHECK_CUDA(voxel_indices);
@@ -1293,6 +1360,7 @@ agregate_backward(
                     out_occupancy_grad,
                     out_density_grad,
                     grid_size,
+                    opacity_weighted,
                     at::cuda::getCurrentCUDAStream());
             }));
         }));

@@ -33,6 +33,7 @@ class _AggregateFn(torch.autograd.Function):
         distance_threshold: float,
         min_radius: int,
         default_value: float,
+        opacity_weighted: bool,
     ):
         # pylint: disable=arguments-differ
         # pylint: disable=too-many-locals
@@ -87,7 +88,12 @@ class _AggregateFn(torch.autograd.Function):
         gaussian_means_int = gaussian_means_int.squeeze(0)
         gaussian_radii = gaussian_radii.squeeze(0)
 
-        # Filter out zero-opacity gaussians to avoid unnecessary kernel work
+        # Filter out zero-opacity gaussians to avoid unnecessary kernel work.
+        #
+        # Note: this is only exact when opacity_weighted=True, where alpha = a * power
+        # makes a zero-opacity gaussian contribute nothing to occupancy/density either.
+        # With opacity_weighted=False, occupancy uses power alone, so a zero-opacity
+        # gaussian still contributes and dropping it here alters the result.
         n_orig = gaussian_means.shape[0]
         active_mask = gaussian_opacities > 0
         active_idx = None
@@ -121,6 +127,7 @@ class _AggregateFn(torch.autograd.Function):
                 ctx.d = d
                 ctx.active_idx = active_idx
                 ctx.n_orig = n_orig
+                ctx.opacity_weighted = opacity_weighted
                 ctx.empty = True
 
                 return (
@@ -160,6 +167,7 @@ class _AggregateFn(torch.autograd.Function):
             w,
             d,
             default_value,
+            opacity_weighted,
         )
 
         ctx.h = h
@@ -167,6 +175,7 @@ class _AggregateFn(torch.autograd.Function):
         ctx.d = d
         ctx.active_idx = active_idx
         ctx.n_orig = n_orig
+        ctx.opacity_weighted = opacity_weighted
         ctx.empty = False
 
         ctx.save_for_backward(
@@ -220,6 +229,7 @@ class _AggregateFn(torch.autograd.Function):
                 None,  # distance_threshold
                 None,  # min_radius
                 None,  # default_value
+                None,  # opacity_weighted
             )
 
         out_semantics_grad = out_semantics_grad.squeeze(0).contiguous()
@@ -269,6 +279,7 @@ class _AggregateFn(torch.autograd.Function):
             h,
             w,
             d,
+            ctx.opacity_weighted,
         )
 
         # Scatter gradients back to original positions if we filtered
@@ -309,6 +320,7 @@ class _AggregateFn(torch.autograd.Function):
             None,  # distance_threshold
             None,  # min_radius
             None,  # default_value
+            None,  # opacity_weighted
         )
 
 
@@ -326,6 +338,7 @@ def aggregate(
     distance_threshold: float,
     min_radius: int,
     default_value: float,
+    opacity_weighted: bool = False,
 ):
     gaussian_icovs = gaussian_icovs.flatten(2)[..., [0, 4, 8, 1, 5, 2]]
 
@@ -354,6 +367,7 @@ def aggregate(
         distance_threshold,
         min_radius,
         default_value,
+        opacity_weighted,
     )
 
 
@@ -362,13 +376,20 @@ class Aggregator(nn.Module):
     voxel_range: torch.Tensor
 
     def __init__(
-        self, distance_threshold, grid_size, voxel_range, voxel_size, min_radius=1
+        self,
+        distance_threshold,
+        grid_size,
+        voxel_range,
+        voxel_size,
+        min_radius=1,
+        opacity_weighted=False,
     ):
         super().__init__()
 
         self.distance_threshold = distance_threshold
         self.min_radius = min_radius
         self.grid_size = grid_size
+        self.opacity_weighted = opacity_weighted
 
         voxel_range = torch.as_tensor(voxel_range, dtype=torch.float)
         voxel_size = torch.as_tensor(voxel_size, dtype=torch.float)
@@ -401,4 +422,5 @@ class Aggregator(nn.Module):
             self.distance_threshold,
             self.min_radius,
             default_value,
+            self.opacity_weighted,
         )

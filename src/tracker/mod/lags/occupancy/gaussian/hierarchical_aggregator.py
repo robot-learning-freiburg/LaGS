@@ -47,6 +47,7 @@ class HierarchicalGaussianAggregator(nn.Module):
         fusion_mode: str = "learned",
         num_channels: int | None = None,
         min_radius: int = 1,
+        opacity_weighted: bool = False,
     ):
         super().__init__()
 
@@ -68,6 +69,7 @@ class HierarchicalGaussianAggregator(nn.Module):
                     voxel_range=voxel_range,
                     scale_multiplier=scale_multiplier[name],
                     min_radius=min_radius,
+                    opacity_weighted=opacity_weighted,
                 )
                 for name in streams
             }

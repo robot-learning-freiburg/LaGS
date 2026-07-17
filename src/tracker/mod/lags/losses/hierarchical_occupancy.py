@@ -260,6 +260,7 @@ class HierarchicalSemanticGaussianLossSoft(nn.Module):
         streams: dict[str, dict],
         ignore_index: int = 255,
         class_weights: tuple[float] | None = None,
+        aggregation_opacity_weighted: bool = False,
     ):
         """
         Initialize hierarchical gaussian loss.
@@ -289,6 +290,7 @@ class HierarchicalSemanticGaussianLossSoft(nn.Module):
             ignore_index: Index to ignore in ground truth (e.g., 255 for unlabeled)
             class_weights: Optional per-class weights for loss
         """
+        # pylint: disable=too-many-locals
         super().__init__()
 
         self.mask = mask if mask != "none" else None
@@ -333,6 +335,7 @@ class HierarchicalSemanticGaussianLossSoft(nn.Module):
                 voxel_size=stream_voxel_size,
                 voxel_range=voxel_range,
                 scale_multiplier=scale_mult,
+                opacity_weighted=aggregation_opacity_weighted,
             )
 
         # Store class weights
@@ -719,6 +722,7 @@ class HierarchicalSemanticGaussianLossHard(nn.Module):
         ignore_index: int = 255,
         tie_breaker: str = "min",
         class_weights: tuple[float] | None = None,
+        aggregation_opacity_weighted: bool = False,
     ):
         """
         Initialize hierarchical gaussian loss with hard labels.
@@ -778,6 +782,7 @@ class HierarchicalSemanticGaussianLossHard(nn.Module):
                 voxel_size=stream_voxel_size,
                 voxel_range=voxel_range,
                 scale_multiplier=scale_mult,
+                opacity_weighted=aggregation_opacity_weighted,
             )
 
         # Store class weights

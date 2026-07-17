@@ -28,7 +28,8 @@ namespace vsplat3d
             const int64_t h,
             const int64_t w,
             const int64_t d,
-            const double default_value);
+            const double default_value,
+            const bool opacity_weighted);
 
         std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
         agregate_backward(
@@ -49,6 +50,7 @@ namespace vsplat3d
             const torch::Tensor &out_density_grad,
             const int64_t h,
             const int64_t w,
-            const int64_t d);
+            const int64_t d,
+            const bool opacity_weighted);
     } /* namesace cuda */
 } /* namespace vsplat3d */
