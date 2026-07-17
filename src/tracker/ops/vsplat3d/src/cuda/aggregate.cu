@@ -449,12 +449,18 @@ __global__ void render_backward_registers(
                 means_grad[1] -= power_grad_times_power * (cov.a12 * d.x + cov.a22 * d.y + cov.a23 * d.z);
                 means_grad[2] -= power_grad_times_power * (cov.a13 * d.x + cov.a23 * d.y + cov.a33 * d.z);
 
-                cov_grad[0] += power_grad_times_power * (-0.5 * d.x * d.x) + deter_grad * (cov.a22 * cov.a33 - cov.a23 * cov.a23);
-                cov_grad[1] += power_grad_times_power * (-0.5 * d.y * d.y) + deter_grad * (cov.a11 * cov.a33 - cov.a13 * cov.a13);
-                cov_grad[2] += power_grad_times_power * (-0.5 * d.z * d.z) + deter_grad * (cov.a11 * cov.a22 - cov.a12 * cov.a12);
-                cov_grad[3] += power_grad_times_power * (-d.x * d.y) + 2 * deter_grad * (cov.a23 * cov.a13 - cov.a33 * cov.a12);
-                cov_grad[4] += power_grad_times_power * (-d.y * d.z) + 2 * deter_grad * (cov.a12 * cov.a13 - cov.a11 * cov.a23);
-                cov_grad[5] += power_grad_times_power * (-d.x * d.z) + 2 * deter_grad * (cov.a12 * cov.a23 - cov.a22 * cov.a13);
+                // Note: the forward takes the determinant as the separate gaussian_idets
+                // input and never computes det(cov), so d(deter)/d(cov) = 0 and there is no
+                // determinant term here. It reaches the caller solely via idets_grad.
+                //
+                // The factor of 2 on the off-diagonals comes from the quadratic form:
+                // q = dx^2 a11 + dy^2 a22 + dz^2 a33 + 2 (dx dy a12 + dy dz a23 + dz dx a13).
+                cov_grad[0] += power_grad_times_power * (-0.5 * d.x * d.x);
+                cov_grad[1] += power_grad_times_power * (-0.5 * d.y * d.y);
+                cov_grad[2] += power_grad_times_power * (-0.5 * d.z * d.z);
+                cov_grad[3] += power_grad_times_power * (-d.x * d.y);
+                cov_grad[4] += power_grad_times_power * (-d.y * d.z);
+                cov_grad[5] += power_grad_times_power * (-d.x * d.z);
             }
         }
 
@@ -586,12 +592,18 @@ __global__ void render_backward_global_memory(
                 means_grad[1] -= power_grad_times_power * (cov.a12 * d.x + cov.a22 * d.y + cov.a23 * d.z);
                 means_grad[2] -= power_grad_times_power * (cov.a13 * d.x + cov.a23 * d.y + cov.a33 * d.z);
 
-                cov_grad[0] += power_grad_times_power * (-0.5 * d.x * d.x) + deter_grad * (cov.a22 * cov.a33 - cov.a23 * cov.a23);
-                cov_grad[1] += power_grad_times_power * (-0.5 * d.y * d.y) + deter_grad * (cov.a11 * cov.a33 - cov.a13 * cov.a13);
-                cov_grad[2] += power_grad_times_power * (-0.5 * d.z * d.z) + deter_grad * (cov.a11 * cov.a22 - cov.a12 * cov.a12);
-                cov_grad[3] += power_grad_times_power * (-d.x * d.y) + 2 * deter_grad * (cov.a23 * cov.a13 - cov.a33 * cov.a12);
-                cov_grad[4] += power_grad_times_power * (-d.y * d.z) + 2 * deter_grad * (cov.a12 * cov.a13 - cov.a11 * cov.a23);
-                cov_grad[5] += power_grad_times_power * (-d.x * d.z) + 2 * deter_grad * (cov.a12 * cov.a23 - cov.a22 * cov.a13);
+                // Note: the forward takes the determinant as the separate gaussian_idets
+                // input and never computes det(cov), so d(deter)/d(cov) = 0 and there is no
+                // determinant term here. It reaches the caller solely via idets_grad.
+                //
+                // The factor of 2 on the off-diagonals comes from the quadratic form:
+                // q = dx^2 a11 + dy^2 a22 + dz^2 a33 + 2 (dx dy a12 + dy dz a23 + dz dx a13).
+                cov_grad[0] += power_grad_times_power * (-0.5 * d.x * d.x);
+                cov_grad[1] += power_grad_times_power * (-0.5 * d.y * d.y);
+                cov_grad[2] += power_grad_times_power * (-0.5 * d.z * d.z);
+                cov_grad[3] += power_grad_times_power * (-d.x * d.y);
+                cov_grad[4] += power_grad_times_power * (-d.y * d.z);
+                cov_grad[5] += power_grad_times_power * (-d.x * d.z);
             }
         }
 
