@@ -626,6 +626,87 @@ def test_anisotropic_radii_match_dense_reference(opacity_weighted):
 
 
 @requires_cuda
+def test_batched_elements_match_individual_calls():
+    """A batched call must reproduce every element's individual result exactly.
+
+    Elements are independent scenes over a shared grid. The element index rides in the
+    high bits of the stable pair sort, so each element keeps the pair order -- and
+    thus the float accumulation order -- of a lone call, making the results bitwise
+    equal, forward and backward. One scene carries a zero-opacity gaussian so the
+    active-gaussian filter runs with per-element counts that differ after filtering.
+    """
+    # pylint: disable=too-many-locals
+    scenes = [
+        _make_scene(num_gaussians=40, grid_size=(16, 16, 8), num_channels=18, seed=s)
+        for s in (0, 1, 2)
+    ]
+    scenes[1]["opacities"][7] = 0.0
+
+    voxel_range = torch.tensor(scenes[0]["voxel_range"], device="cuda")
+    voxel_size = torch.tensor(VOXEL_SIZE, device="cuda")
+
+    names = ["means", "icovs", "idets", "opacities", "semantics"]
+    stacked = {
+        k: torch.stack([s[k] for s in scenes])
+        for k in names + ["sample_points", "scales"]
+    }
+    for name in names:
+        stacked[name].requires_grad_(True)
+
+    batched = vsplat3d.aggregate(
+        stacked["sample_points"],
+        stacked["means"],
+        stacked["icovs"],
+        stacked["idets"],
+        stacked["scales"],
+        stacked["opacities"],
+        stacked["semantics"],
+        voxel_range,
+        voxel_size,
+        scenes[0]["grid_size"],
+        DISTANCE_THRESHOLD,
+        MIN_RADIUS,
+        DEFAULT_VALUE,
+        False,
+    )
+
+    gen = torch.Generator(device="cuda").manual_seed(31)
+    n_pts = scenes[0]["sample_points"].shape[0]
+    n_ch = scenes[0]["semantics"].shape[1]
+
+    grad_sem = torch.randn(len(scenes), n_pts, n_ch, generator=gen, device="cuda")
+    grad_occ = torch.randn(len(scenes), n_pts, generator=gen, device="cuda")
+    grad_density = torch.randn(len(scenes), n_pts, generator=gen, device="cuda")
+
+    batched_grads = _grads(
+        batched[:3],
+        [stacked[n] for n in names],
+        [grad_sem, grad_occ, grad_density],
+    )
+
+    for i, scene in enumerate(scenes):
+        scn = dict(scene)
+        for name in names:
+            scn[name] = scene[name].clone().requires_grad_(True)
+
+        single = _call_kernel(scn, opacity_weighted=False)
+
+        for out_name, got, want in zip(
+            ["sem", "occ", "density", "prob_sum"], batched, single
+        ):
+            assert torch.equal(got[i], want[0]), f"{out_name} differs for element {i}"
+
+        single_grads = _grads(
+            [o[0] for o in single[:3]],
+            [scn[n] for n in names],
+            [grad_sem[i], grad_occ[i], grad_density[i]],
+        )
+
+        for name, got, want in zip(names, batched_grads, single_grads):
+            assert torch.equal(got[i], want), f"{name} grad differs for element {i}"
+
+
+@requires_cuda
 def test_forward_multiple_sample_points_per_voxel():
     """Several sample points sharing a voxel must each be rendered at their own
     coordinates.

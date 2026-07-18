@@ -181,11 +181,13 @@ __global__ void compute_gaussian_brick_pairs(
     index_t const num_gaussians,
     index_t const* gaussian_cells,
     index_t const* radii,
+    index_t const* gaussian_elements,
     index_t const* offsets,
     index_t* pair_gaussians,
     index_t* pair_bricks,
     math::vec3<index_t> const grid,
-    math::vec3<index_t> const brick_grid)
+    math::vec3<index_t> const brick_grid,
+    index_t const bricks_per_element)
 {
     index_t const idx = ((index_t) blockIdx.x) * blockDim.x + threadIdx.x;
     index_t const stride = (blockDim.x * gridDim.x) / C10_WARP_SIZE;
@@ -200,6 +202,10 @@ __global__ void compute_gaussian_brick_pairs(
         auto const cell = math::vec3<index_t>::load(gaussian_cells + 3 * i);
         auto const rect = get_brick_rect(
             get_rect(cell, math::vec3<index_t>::load(radii + 3 * i), grid));
+
+        // Batching folds the element index into the key's high bits, so pairs of
+        // different elements never mix and each element keeps its emission order.
+        auto const element_base = gaussian_elements[i] * bricks_per_element;
 
         for (index_t j = start + tid_in_warp; j < end; j += C10_WARP_SIZE) {
             auto const local_idx = j - start;
@@ -217,7 +223,7 @@ __global__ void compute_gaussian_brick_pairs(
             auto const brick_index = x * brick_grid.y * brick_grid.z + y * brick_grid.z + z;
 
             pair_gaussians[j] = i;
-            pair_bricks[j] = brick_index;
+            pair_bricks[j] = element_base + brick_index;
         }
     }
 }
@@ -246,20 +252,22 @@ template <typename index_t>
 __global__ void compute_voxel_to_point_map(
     index_t const num_points,
     index_t const* points_xyz,
+    index_t const* point_elements,
     math::vec3<index_t> const grid,
+    index_t const voxels_per_element,
     index_t* voxel_to_point_index)
 {
     CUDA_1D_KERNEL_LOOP(idx, num_points) {
         auto const point = math::vec3<index_t>::load(points_xyz + 3 * idx);
 
         index_t const voxel_idx = point.x * grid.y * grid.z + point.y * grid.z + point.z;
-        voxel_to_point_index[voxel_idx] = idx;
+        voxel_to_point_index[point_elements[idx] * voxels_per_element + voxel_idx] = idx;
     }
 }
 
 template <typename index_t, typename float_t, typename data_t, int NUM_CHANNELS>
 __global__ void render_forward_bricks_registers(
-    index_t const num_bricks,
+    index_t const num_keys,
     index_t const num_channels, // actual channel count (must be <= NUM_CHANNELS)
     float_t const* __restrict__ sample_points,
     float_t const* __restrict__ gaussian_means,
@@ -275,6 +283,8 @@ __global__ void render_forward_bricks_registers(
     index_t const* __restrict__ voxel_to_point,
     math::vec3<index_t> const grid_size,
     math::vec3<index_t> const brick_grid,
+    index_t const bricks_per_element,
+    index_t const voxels_per_element,
     data_t default_value,
     bool const opacity_weighted,
     data_t* __restrict__ out_semantics,
@@ -294,7 +304,10 @@ __global__ void render_forward_bricks_registers(
 
     auto const tid = static_cast<index_t>(threadIdx.x);
 
-    for (index_t brick = blockIdx.x; brick < num_bricks; brick += gridDim.x) {
+    for (index_t key = blockIdx.x; key < num_keys; key += gridDim.x) {
+        auto const element = key / bricks_per_element;
+        auto const brick = key % bricks_per_element;
+
         auto const brick_x = brick / (brick_grid.y * brick_grid.z);
         auto const brick_y = (brick / brick_grid.z) % brick_grid.y;
         auto const brick_z = brick % brick_grid.z;
@@ -316,15 +329,15 @@ __global__ void render_forward_bricks_registers(
                 + voxel.y * grid_size.z
                 + voxel.z;
 
-            pts_idx = voxel_to_point[voxel_idx];
+            pts_idx = voxel_to_point[element * voxels_per_element + voxel_idx];
         }
 
         // Note: block-uniform result, so the continue cannot split the barriers below.
         if (__syncthreads_count(pts_idx >= 0) == 0)
             continue;
 
-        auto const range_start = brick_ranges[brick * 2 + 0];
-        auto const range_end = brick_ranges[brick * 2 + 1];
+        auto const range_start = brick_ranges[key * 2 + 0];
+        auto const range_end = brick_ranges[key * 2 + 1];
 
         auto const point = pts_idx >= 0
             ? math::vec3<float_t>::load(sample_points + 3 * pts_idx)
@@ -446,7 +459,7 @@ __global__ void render_forward_bricks_registers(
 // fallback kernel for very large channel counts
 template <typename index_t, typename float_t, typename data_t>
 __global__ void render_forward_bricks_global_memory(
-    index_t const num_bricks,
+    index_t const num_keys,
     index_t const num_channels,
     float_t const* __restrict__ sample_points,
     float_t const* __restrict__ gaussian_means,
@@ -462,6 +475,8 @@ __global__ void render_forward_bricks_global_memory(
     index_t const* __restrict__ voxel_to_point,
     math::vec3<index_t> const grid_size,
     math::vec3<index_t> const brick_grid,
+    index_t const bricks_per_element,
+    index_t const voxels_per_element,
     data_t default_value,
     bool const opacity_weighted,
     data_t* __restrict__ out_semantics,
@@ -479,7 +494,10 @@ __global__ void render_forward_bricks_global_memory(
 
     auto const tid = static_cast<index_t>(threadIdx.x);
 
-    for (index_t brick = blockIdx.x; brick < num_bricks; brick += gridDim.x) {
+    for (index_t key = blockIdx.x; key < num_keys; key += gridDim.x) {
+        auto const element = key / bricks_per_element;
+        auto const brick = key % bricks_per_element;
+
         auto const brick_x = brick / (brick_grid.y * brick_grid.z);
         auto const brick_y = (brick / brick_grid.z) % brick_grid.y;
         auto const brick_z = brick % brick_grid.z;
@@ -500,15 +518,15 @@ __global__ void render_forward_bricks_global_memory(
                 + voxel.y * grid_size.z
                 + voxel.z;
 
-            pts_idx = voxel_to_point[voxel_idx];
+            pts_idx = voxel_to_point[element * voxels_per_element + voxel_idx];
         }
 
         // Note: block-uniform result, so the continue cannot split the barriers below.
         if (__syncthreads_count(pts_idx >= 0) == 0)
             continue;
 
-        auto const range_start = brick_ranges[brick * 2 + 0];
-        auto const range_end = brick_ranges[brick * 2 + 1];
+        auto const range_start = brick_ranges[key * 2 + 0];
+        auto const range_end = brick_ranges[key * 2 + 1];
 
         auto const point = pts_idx >= 0
             ? math::vec3<float_t>::load(sample_points + 3 * pts_idx)
@@ -618,6 +636,7 @@ __global__ void render_forward_remainder(
     index_t const num_channels,
     float_t const* __restrict__ sample_points,
     index_t const* __restrict__ sample_points_int,
+    index_t const* __restrict__ point_elements,
     float_t const* __restrict__ gaussian_means,
     float_t const* __restrict__ gaussian_icovs,
     float_t const* __restrict__ gaussian_idets,
@@ -631,6 +650,8 @@ __global__ void render_forward_remainder(
     index_t const* __restrict__ voxel_to_point,
     math::vec3<index_t> const grid_size,
     math::vec3<index_t> const brick_grid,
+    index_t const bricks_per_element,
+    index_t const voxels_per_element,
     data_t default_value,
     bool const opacity_weighted,
     data_t* __restrict__ out_semantics,
@@ -641,20 +662,23 @@ __global__ void render_forward_remainder(
     CUDA_1D_KERNEL_LOOP(idx, num_samples) {
         auto const point_int = math::vec3<index_t>::load(sample_points_int + idx * 3);
 
+        auto const element = point_elements[idx];
+
         auto const voxel_idx = point_int.x * grid_size.y * grid_size.z
             + point_int.y * grid_size.z
             + point_int.z;
 
         // Rendered by the brick kernel already.
-        if (voxel_to_point[voxel_idx] == static_cast<index_t>(idx))
+        if (voxel_to_point[element * voxels_per_element + voxel_idx] == static_cast<index_t>(idx))
             continue;
 
-        auto const brick = (point_int.x / brick_edge) * brick_grid.y * brick_grid.z
+        auto const key = element * bricks_per_element
+            + (point_int.x / brick_edge) * brick_grid.y * brick_grid.z
             + (point_int.y / brick_edge) * brick_grid.z
             + (point_int.z / brick_edge);
 
-        auto const range_start = brick_ranges[brick * 2 + 0];
-        auto const range_end = brick_ranges[brick * 2 + 1];
+        auto const range_start = brick_ranges[key * 2 + 0];
+        auto const range_end = brick_ranges[key * 2 + 1];
 
         auto const point = math::vec3<float_t>::load(sample_points + 3 * idx);
         auto const out_sem = out_semantics + idx * num_channels;
@@ -744,6 +768,8 @@ __global__ void render_backward_bricks(
     float_t const* __restrict__ out_density_grad,
     math::vec3<index_t> const grid_size,
     math::vec3<index_t> const brick_grid,
+    index_t const bricks_per_element,
+    index_t const voxels_per_element,
     bool const opacity_weighted,
     float_t* __restrict__ partial_geometry,  // [num_pairs, num_geometry_grads]
     data_t* __restrict__ partial_semantics)  // [num_pairs, num_channels]
@@ -751,7 +777,10 @@ __global__ void render_backward_bricks(
     CUDA_1D_KERNEL_LOOP(p, num_pairs) {
         auto const slot = pair_order[p];
         auto const idx = pair_gaussians[slot];
-        auto const brick = pair_bricks[p];
+
+        auto const key = pair_bricks[p];
+        auto const element = key / bricks_per_element;
+        auto const brick = key % bricks_per_element;
 
         auto const mean = math::vec3<float_t>::load(gaussian_means + 3 * idx);
         auto const cov = math::smat3<float_t>::load(gaussian_icovs + 6 * idx);
@@ -800,7 +829,7 @@ __global__ void render_backward_bricks(
                 + voxel.y * grid_size.z
                 + voxel.z;
 
-            auto const pts_idx = voxel_to_point[voxel_idx];
+            auto const pts_idx = voxel_to_point[element * voxels_per_element + voxel_idx];
             if (pts_idx >= 0)
             {
                 auto const d = mean - math::vec3<float_t>::load(sample_points + pts_idx * 3);
@@ -994,6 +1023,7 @@ __global__ void render_backward_warps(
     index_t const num_channels, // actual channel count (must be <= NUM_CHANNELS)
     index_t const* __restrict__ gaussian_cells,
     index_t const* __restrict__ gaussian_radii,
+    index_t const* __restrict__ gaussian_elements,
     index_t const* __restrict__ voxel_to_point,
     float_t const* __restrict__ sample_points,
     float_t const* __restrict__ gaussian_means,
@@ -1008,6 +1038,7 @@ __global__ void render_backward_warps(
     float_t const* __restrict__ out_occupancy_grad,
     float_t const* __restrict__ out_density_grad,
     math::vec3<index_t> const grid_size,
+    index_t const voxels_per_element,
     bool const opacity_weighted,
     float_t* __restrict__ g_means_grad,
     float_t* __restrict__ g_icov_grad,
@@ -1034,6 +1065,8 @@ __global__ void render_backward_warps(
         auto const rect = get_rect(
             cell, math::vec3<index_t>::load(gaussian_radii + 3 * idx), grid_size);
 
+        auto const element = gaussian_elements[idx];
+
         auto const sem_base = idx * num_channels;
 
         data_t sem[channels_per_lane];
@@ -1057,7 +1090,7 @@ __global__ void render_backward_warps(
         for (auto z = rect.min.z; z < rect.max.z; z++)
         {
             auto const voxel_idx = x * grid_size.y * grid_size.z + y * grid_size.z + z;
-            auto const pts_idx = voxel_to_point[voxel_idx];
+            auto const pts_idx = voxel_to_point[element * voxels_per_element + voxel_idx];
             if (pts_idx >= 0)
             {
                 auto const d = mean - math::vec3<float_t>::load(sample_points + pts_idx * 3);
@@ -1191,6 +1224,7 @@ __global__ void render_backward_global_memory(
     index_t const num_channels,
     index_t const* __restrict__ gaussian_cells,
     index_t const* __restrict__ gaussian_radii,
+    index_t const* __restrict__ gaussian_elements,
     index_t const* __restrict__ voxel_to_point,
     float_t const* __restrict__ sample_points,
     float_t const* __restrict__ gaussian_means,
@@ -1205,6 +1239,7 @@ __global__ void render_backward_global_memory(
     float_t const* __restrict__ out_occupancy_grad,
     float_t const* __restrict__ out_density_grad,
     math::vec3<index_t> const grid_size,
+    index_t const voxels_per_element,
     bool const opacity_weighted,
     float_t* __restrict__ g_means_grad,
     float_t* __restrict__ g_icov_grad,
@@ -1221,6 +1256,8 @@ __global__ void render_backward_global_memory(
         auto const cell = math::vec3<index_t>::load(gaussian_cells + 3 * idx);
         auto const rect = get_rect(
             cell, math::vec3<index_t>::load(gaussian_radii + 3 * idx), grid_size);
+
+        auto const element = gaussian_elements[idx];
 
         auto const sem_base = idx * num_channels;
         auto const p_sem_grad = g_semantics_grad + idx * num_channels;
@@ -1239,7 +1276,7 @@ __global__ void render_backward_global_memory(
         for (auto z = rect.min.z; z < rect.max.z; z++)
         {
             auto const voxel_idx = x * grid_size.y * grid_size.z + y * grid_size.z + z;
-            auto const pts_idx = voxel_to_point[voxel_idx];
+            auto const pts_idx = voxel_to_point[element * voxels_per_element + voxel_idx];
             if (pts_idx >= 0)
             {
                 auto const d = mean - math::vec3<float_t>::load(sample_points + pts_idx * 3);
@@ -1520,6 +1557,7 @@ inline std::tuple<at::Tensor, at::Tensor>
 compute_gaussian_brick_pairs(
     at::Tensor const& gaussian_cells,
     at::Tensor const& radii,
+    at::Tensor const& gaussian_elements,
     at::Tensor const& offsets,
     math::vec3<index_t> const& grid_size,
     math::vec3<index_t> const& brick_grid,
@@ -1545,11 +1583,13 @@ compute_gaussian_brick_pairs(
         num_gaussians,
         gaussian_cells.template const_data_ptr<index_t>(),
         radii.template const_data_ptr<index_t>(),
+        gaussian_elements.template const_data_ptr<index_t>(),
         offsets.template const_data_ptr<index_t>(),
         pair_gaussians.template mutable_data_ptr<index_t>(),
         pair_bricks.template mutable_data_ptr<index_t>(),
         grid_size,
-        brick_grid);
+        brick_grid,
+        prod(brick_grid));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     return {pair_gaussians, pair_bricks};
@@ -1565,7 +1605,7 @@ template <typename index_t>
 inline std::tuple<at::Tensor, at::Tensor>
 sort_gaussian_brick_pairs(
     at::Tensor const& pair_bricks,
-    index_t const num_bricks,
+    index_t const num_keys,
     c10::cuda::CUDAStream const& stream)
 {
     auto const opts = at::TensorOptions()
@@ -1577,10 +1617,10 @@ sort_gaussian_brick_pairs(
     auto sorted_bricks = at::empty_like(pair_bricks);
     auto sorted_slots = at::empty_like(slots);
 
-    // Brick indices are dense in [0, num_bricks), so the sort only needs to look at the
-    // bits that can actually be set.
+    // Keys (element index x bricks + brick index) are dense in [0, num_keys), so the
+    // sort only needs to look at the bits that can actually be set.
     int end_bit = 1;
-    while ((int64_t{1} << end_bit) < static_cast<int64_t>(num_bricks))
+    while ((int64_t{1} << end_bit) < static_cast<int64_t>(num_keys))
         end_bit++;
 
     cub::radix_sort_pairs(
@@ -1627,6 +1667,8 @@ inline at::Tensor compute_key_ranges(
 template <typename index_t>
 inline at::Tensor compute_voxel_to_point_map(
     at::Tensor const& points_xyz,
+    at::Tensor const& point_elements,
+    index_t const num_elements,
     math::vec3<index_t> const& grid_size,
     c10::cuda::CUDAStream const& stream)
 {
@@ -1636,7 +1678,7 @@ inline at::Tensor compute_voxel_to_point_map(
             .device(points_xyz.device())
             .dtype(c10::CppTypeToScalarType<index_t>());
 
-    auto indices = at::full({prod(grid_size)}, -1, opts);
+    auto indices = at::full({num_elements * prod(grid_size)}, -1, opts);
 
     auto const threads = 512;
     auto const blocks = (num_points + threads - 1) / threads;
@@ -1644,7 +1686,9 @@ inline at::Tensor compute_voxel_to_point_map(
     kernel::compute_voxel_to_point_map<<<blocks, threads, 0, stream>>>(
         num_points,
         points_xyz.template const_data_ptr<index_t>(),
+        point_elements.template const_data_ptr<index_t>(),
         grid_size,
+        prod(grid_size),
         indices.template mutable_data_ptr<index_t>());
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
@@ -1656,6 +1700,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 render_forward(
     at::Tensor const& sample_points,
     at::Tensor const& sample_points_int,
+    at::Tensor const& point_elements,
     at::Tensor const& gaussian_means,
     at::Tensor const& gaussian_icovs,
     at::Tensor const& gaussian_idets,
@@ -1669,7 +1714,7 @@ render_forward(
     at::Tensor const& voxel_to_point,
     math::vec3<index_t> const& grid_size,
     math::vec3<index_t> const& brick_grid,
-    index_t const num_bricks,
+    index_t const num_keys,
     data_t default_value,
     bool const opacity_weighted,
     PhaseProfiler& profiler,
@@ -1692,8 +1737,8 @@ render_forward(
     auto out_probability = at::full({num_samples}, 0.0, float_opts);
 
     dispatch_kernel<ForwardKernelWrapper<index_t, float_t, data_t>, CommonChannels>(
-        num_channels, num_bricks, kernel::brick_volume, stream,
-        num_bricks,
+        num_channels, num_keys, kernel::brick_volume, stream,
+        num_keys,
         num_channels,
         sample_points.template const_data_ptr<float_t>(),
         gaussian_means.template const_data_ptr<float_t>(),
@@ -1709,6 +1754,8 @@ render_forward(
         voxel_to_point.template const_data_ptr<index_t>(),
         grid_size,
         brick_grid,
+        prod(brick_grid),
+        prod(grid_size),
         default_value,
         opacity_weighted,
         out_semantics.template mutable_data_ptr<data_t>(),
@@ -1727,6 +1774,7 @@ render_forward(
             num_channels,
             sample_points.template const_data_ptr<float_t>(),
             sample_points_int.template const_data_ptr<index_t>(),
+            point_elements.template const_data_ptr<index_t>(),
             gaussian_means.template const_data_ptr<float_t>(),
             gaussian_icovs.template const_data_ptr<float_t>(),
             gaussian_idets.template const_data_ptr<float_t>(),
@@ -1740,6 +1788,8 @@ render_forward(
             voxel_to_point.template const_data_ptr<index_t>(),
             grid_size,
             brick_grid,
+            prod(brick_grid),
+            prod(grid_size),
             default_value,
             opacity_weighted,
             out_semantics.template mutable_data_ptr<data_t>(),
@@ -1763,6 +1813,7 @@ render_backward(
     at::Tensor const& pair_order,
     at::Tensor const& gaussian_cells,
     at::Tensor const& gaussian_radii,
+    at::Tensor const& gaussian_elements,
     at::Tensor const& voxel_to_point,
     at::Tensor const& sample_points,
     at::Tensor const& gaussian_means,
@@ -1832,6 +1883,8 @@ render_backward(
                 out_density_grad.template const_data_ptr<float_t>(),
                 grid_size,
                 brick_grid,
+                prod(brick_grid),
+                prod(grid_size),
                 opacity_weighted,
                 partial_geometry.template mutable_data_ptr<float_t>(),
                 partial_semantics.template mutable_data_ptr<data_t>());
@@ -1871,6 +1924,7 @@ render_backward(
             static_cast<index_t>(num_channels),
             gaussian_cells.template const_data_ptr<index_t>(),
             gaussian_radii.template const_data_ptr<index_t>(),
+            gaussian_elements.template const_data_ptr<index_t>(),
             voxel_to_point.template const_data_ptr<index_t>(),
             sample_points.template const_data_ptr<float_t>(),
             gaussian_means.template const_data_ptr<float_t>(),
@@ -1885,6 +1939,7 @@ render_backward(
             out_occupancy_grad.template const_data_ptr<float_t>(),
             out_density_grad.template const_data_ptr<float_t>(),
             grid_size,
+            prod(grid_size),
             opacity_weighted,
             means_grad.template mutable_data_ptr<float_t>(),
             icov_grad.template mutable_data_ptr<float_t>(),
@@ -1902,6 +1957,7 @@ render_backward(
             static_cast<index_t>(num_channels),
             gaussian_cells.template const_data_ptr<index_t>(),
             gaussian_radii.template const_data_ptr<index_t>(),
+            gaussian_elements.template const_data_ptr<index_t>(),
             voxel_to_point.template const_data_ptr<index_t>(),
             sample_points.template const_data_ptr<float_t>(),
             gaussian_means.template const_data_ptr<float_t>(),
@@ -1916,6 +1972,7 @@ render_backward(
             out_occupancy_grad.template const_data_ptr<float_t>(),
             out_density_grad.template const_data_ptr<float_t>(),
             grid_size,
+            prod(grid_size),
             opacity_weighted,
             means_grad.template mutable_data_ptr<float_t>(),
             icov_grad.template mutable_data_ptr<float_t>(),
@@ -1940,8 +1997,11 @@ aggregate_forward(
     at::Tensor const& gaussian_opacities,
     at::Tensor const& gaussian_semantics,
     at::Tensor const& sample_points_int,
+    at::Tensor const& point_elements,
     at::Tensor const& gaussian_means_int,
     at::Tensor const& gaussian_radii,
+    at::Tensor const& gaussian_elements,
+    index_t const num_elements,
     math::vec3<index_t> const& grid_size,
     data_t default_value,
     bool const opacity_weighted,
@@ -1950,7 +2010,7 @@ aggregate_forward(
     PhaseProfiler profiler{stream};
 
     auto const brick_grid = get_brick_grid(grid_size);
-    auto const num_bricks = prod(brick_grid);
+    auto const num_keys = num_elements * prod(brick_grid);
 
     auto pair_offsets = compute_gaussian_brick_offsets<index_t>(
         gaussian_means_int,
@@ -1966,6 +2026,7 @@ aggregate_forward(
     ] = compute_gaussian_brick_pairs<index_t>(
         gaussian_means_int,
         gaussian_radii,
+        gaussian_elements,
         pair_offsets,
         grid_size,
         brick_grid,
@@ -1978,18 +2039,18 @@ aggregate_forward(
         sorted_slots
     ] = sort_gaussian_brick_pairs<index_t>(
         pair_bricks,
-        num_bricks,
+        num_keys,
         stream);
 
     profiler.mark("sort");
 
     auto brick_ranges = compute_key_ranges<index_t>(
-        sorted_bricks, num_bricks, stream);
+        sorted_bricks, num_keys, stream);
 
     profiler.mark("ranges");
 
     auto const voxel_to_point = compute_voxel_to_point_map<index_t>(
-        sample_points_int, grid_size, stream);
+        sample_points_int, point_elements, num_elements, grid_size, stream);
 
     profiler.mark("point_map");
 
@@ -2001,6 +2062,7 @@ aggregate_forward(
     ] = render_forward<index_t, float_t, data_t>(
         sample_points,
         sample_points_int,
+        point_elements,
         gaussian_means,
         gaussian_icovs,
         gaussian_idets,
@@ -2014,7 +2076,7 @@ aggregate_forward(
         voxel_to_point,
         grid_size,
         brick_grid,
-        num_bricks,
+        num_keys,
         default_value,
         opacity_weighted,
         profiler,
@@ -2041,7 +2103,10 @@ aggregate_backward(
     at::Tensor const& pair_order,
     at::Tensor const& gaussian_means_int,
     at::Tensor const& gaussian_radii,
+    at::Tensor const& gaussian_elements,
     at::Tensor const& sample_points_int,
+    at::Tensor const& point_elements,
+    index_t const num_elements,
     at::Tensor const& sample_points,
     at::Tensor const& gaussian_means,
     at::Tensor const& gaussian_icovs,
@@ -2063,7 +2128,7 @@ aggregate_backward(
     auto const brick_grid = get_brick_grid(grid_size);
 
     auto const voxel_to_point = compute_voxel_to_point_map<index_t>(
-        sample_points_int, grid_size, stream);
+        sample_points_int, point_elements, num_elements, grid_size, stream);
 
     profiler.mark("bwd_point_map");
 
@@ -2074,6 +2139,7 @@ aggregate_backward(
         pair_order,
         gaussian_means_int,
         gaussian_radii,
+        gaussian_elements,
         voxel_to_point,
         sample_points,
         gaussian_means,
@@ -2106,8 +2172,11 @@ aggregate_forward(
     at::Tensor const& gaussian_opacities,
     at::Tensor const& gaussian_semantics,
     at::Tensor const& sample_points_int,
+    at::Tensor const& point_elements,
     at::Tensor const& gaussian_means_int,
     at::Tensor const& gaussian_radii,
+    at::Tensor const& gaussian_elements,
+    int64_t const num_elements,
     int64_t const h,
     int64_t const w,
     int64_t const d,
@@ -2121,8 +2190,10 @@ aggregate_forward(
     CHECK_CUDA(gaussian_opacities);
     CHECK_CUDA(gaussian_semantics);
     CHECK_CUDA(sample_points_int);
+    CHECK_CUDA(point_elements);
     CHECK_CUDA(gaussian_means_int);
     CHECK_CUDA(gaussian_radii);
+    CHECK_CUDA(gaussian_elements);
 
     CHECK_CONTIGUOUS(sample_points);
     CHECK_CONTIGUOUS(gaussian_means);
@@ -2131,8 +2202,10 @@ aggregate_forward(
     CHECK_CONTIGUOUS(gaussian_opacities);
     CHECK_CONTIGUOUS(gaussian_semantics);
     CHECK_CONTIGUOUS(sample_points_int);
+    CHECK_CONTIGUOUS(point_elements);
     CHECK_CONTIGUOUS(gaussian_means_int);
     CHECK_CONTIGUOUS(gaussian_radii);
+    CHECK_CONTIGUOUS(gaussian_elements);
 
     return VSPLAT3D_DISPATCH_INDEX_TYPES(sample_points_int.scalar_type(), "aggregate_forward", ([&] {
         using index_t = scalar_t;
@@ -2157,8 +2230,11 @@ aggregate_forward(
                     gaussian_opacities,
                     gaussian_semantics,
                     sample_points_int,
+                    point_elements,
                     gaussian_means_int,
                     gaussian_radii,
+                    gaussian_elements,
+                    static_cast<index_t>(num_elements),
                     grid_size,
                     static_cast<data_t>(default_value),
                     opacity_weighted,
@@ -2176,7 +2252,10 @@ agregate_backward(
     at::Tensor const& pair_order,
     at::Tensor const& gaussian_means_int,
     at::Tensor const& gaussian_radii,
+    at::Tensor const& gaussian_elements,
     at::Tensor const& sample_points_int,
+    at::Tensor const& point_elements,
+    int64_t const num_elements,
     at::Tensor const& sample_points,
     at::Tensor const& gaussian_means,
     at::Tensor const& gaussian_icovs,
@@ -2200,7 +2279,9 @@ agregate_backward(
     CHECK_CUDA(pair_order);
     CHECK_CUDA(gaussian_means_int);
     CHECK_CUDA(gaussian_radii);
+    CHECK_CUDA(gaussian_elements);
     CHECK_CUDA(sample_points_int);
+    CHECK_CUDA(point_elements);
     CHECK_CUDA(sample_points);
     CHECK_CUDA(gaussian_means);
     CHECK_CUDA(gaussian_icovs);
@@ -2220,7 +2301,9 @@ agregate_backward(
     CHECK_CONTIGUOUS(pair_order);
     CHECK_CONTIGUOUS(gaussian_means_int);
     CHECK_CONTIGUOUS(gaussian_radii);
+    CHECK_CONTIGUOUS(gaussian_elements);
     CHECK_CONTIGUOUS(sample_points_int);
+    CHECK_CONTIGUOUS(point_elements);
     CHECK_CONTIGUOUS(sample_points);
     CHECK_CONTIGUOUS(gaussian_means);
     CHECK_CONTIGUOUS(gaussian_icovs);
@@ -2256,7 +2339,10 @@ agregate_backward(
                     pair_order,
                     gaussian_means_int,
                     gaussian_radii,
+                    gaussian_elements,
                     sample_points_int,
+                    point_elements,
+                    static_cast<index_t>(num_elements),
                     sample_points,
                     gaussian_means,
                     gaussian_icovs,

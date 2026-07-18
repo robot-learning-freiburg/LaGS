@@ -40,8 +40,12 @@ class _AggregateFn(torch.autograd.Function):
         # pylint: disable=too-many-locals
         # pylint: disable=too-many-statements
 
-        assert sample_points.shape[0] == 1, "Batch size > 1 not supported yet"
         assert not sample_points.requires_grad
+
+        # Leading dim is the batch of independent elements (batch entries, layers,
+        # streams, ...), each with its own gaussians, all sharing one voxel grid.
+        num_elements, num_points, _ = sample_points.shape
+        num_gaussians = gaussian_means.shape[1]
 
         h, w, d = grid_size
         device = sample_points.device
@@ -97,15 +101,23 @@ class _AggregateFn(torch.autograd.Function):
         gaussian_radii = torch.ceil(gaussian_radii).to(torch.int)
         gaussian_radii = torch.clamp(gaussian_radii, min=min_radius).contiguous()
 
-        sample_points = sample_points.squeeze(0)
-        gaussian_means = gaussian_means.squeeze(0)
-        gaussian_icovs = gaussian_icovs.squeeze(0)
-        gaussian_idets = gaussian_idets.squeeze(0)
-        gaussian_opacities = gaussian_opacities.squeeze(0)
-        gaussian_semantics = gaussian_semantics.squeeze(0)
-        sample_points_int = sample_points_int.squeeze(0)
-        gaussian_means_int = gaussian_means_int.squeeze(0)
-        gaussian_radii = gaussian_radii.squeeze(0)
+        # Flatten the element dim; the kernel is jagged-native and tracks each point's
+        # and gaussian's element through explicit per-item element indices.
+        sample_points = sample_points.reshape(-1, 3)
+        gaussian_means = gaussian_means.reshape(-1, 3)
+        gaussian_icovs = gaussian_icovs.reshape(-1, 6)
+        gaussian_idets = gaussian_idets.reshape(-1)
+        gaussian_opacities = gaussian_opacities.reshape(-1)
+        gaussian_semantics = gaussian_semantics.reshape(
+            num_elements * num_gaussians, -1
+        )
+        sample_points_int = sample_points_int.reshape(-1, 3)
+        gaussian_means_int = gaussian_means_int.reshape(-1, 3)
+        gaussian_radii = gaussian_radii.reshape(-1, 3)
+
+        elements = torch.arange(num_elements, device=device, dtype=torch.int)
+        point_elements = elements.repeat_interleave(num_points)
+        gaussian_elements = elements.repeat_interleave(num_gaussians)
 
         # Filter out zero-opacity gaussians to avoid unnecessary kernel work.
         #
@@ -153,15 +165,18 @@ class _AggregateFn(torch.autograd.Function):
                 ctx.d = d
                 ctx.active_idx = active_idx
                 ctx.n_orig = n_orig
+                ctx.num_elements = num_elements
+                ctx.num_points = num_points
+                ctx.num_gaussians = num_gaussians
                 ctx.opacity_weighted = opacity_weighted
                 ctx.empty = True
 
                 return (
-                    out_semantics.unsqueeze(0),
-                    out_occupancy.unsqueeze(0),
-                    out_density.unsqueeze(0),
+                    out_semantics.reshape(num_elements, num_points, -1),
+                    out_occupancy.reshape(num_elements, num_points),
+                    out_density.reshape(num_elements, num_points),
                     # prob_sum has no backward — detach to prevent silent zero-gradient bugs
-                    out_prob_sum.unsqueeze(0).detach(),
+                    out_prob_sum.reshape(num_elements, num_points).detach(),
                 )
 
             gaussian_means = gaussian_means[active_idx]
@@ -171,6 +186,7 @@ class _AggregateFn(torch.autograd.Function):
             gaussian_semantics = gaussian_semantics[active_idx]
             gaussian_means_int = gaussian_means_int[active_idx]
             gaussian_radii = gaussian_radii[active_idx]
+            gaussian_elements = gaussian_elements[active_idx]
 
         (
             out_semantics,
@@ -189,8 +205,11 @@ class _AggregateFn(torch.autograd.Function):
             gaussian_opacities,
             gaussian_semantics,
             sample_points_int,
+            point_elements,
             gaussian_means_int,
             gaussian_radii,
+            gaussian_elements,
+            num_elements,
             h,
             w,
             d,
@@ -203,6 +222,9 @@ class _AggregateFn(torch.autograd.Function):
         ctx.d = d
         ctx.active_idx = active_idx
         ctx.n_orig = n_orig
+        ctx.num_elements = num_elements
+        ctx.num_points = num_points
+        ctx.num_gaussians = num_gaussians
         ctx.opacity_weighted = opacity_weighted
         ctx.empty = False
 
@@ -213,7 +235,9 @@ class _AggregateFn(torch.autograd.Function):
             pair_order,
             gaussian_means_int,
             gaussian_radii,
+            gaussian_elements,
             sample_points_int,
+            point_elements,
             sample_points,
             gaussian_means,
             gaussian_icovs,
@@ -226,11 +250,11 @@ class _AggregateFn(torch.autograd.Function):
         )
 
         return (
-            out_semantics.unsqueeze(0),
-            out_occupancy.unsqueeze(0),
-            out_density.unsqueeze(0),
+            out_semantics.reshape(num_elements, num_points, -1),
+            out_occupancy.reshape(num_elements, num_points),
+            out_density.reshape(num_elements, num_points),
             # prob_sum has no backward — detach to prevent silent zero-gradient bugs
-            out_prob_sum.unsqueeze(0).detach(),
+            out_prob_sum.reshape(num_elements, num_points).detach(),
         )
 
     @staticmethod
@@ -241,20 +265,24 @@ class _AggregateFn(torch.autograd.Function):
         # pylint: disable=too-many-locals
 
         n_orig = ctx.n_orig
+        num_elements = ctx.num_elements
+        num_points = ctx.num_points
+        num_gaussians = ctx.num_gaussians
 
         # All gaussians were filtered out — return zero gradients
         if ctx.empty:
             device = out_semantics_grad.device
             dtype = out_semantics_grad.dtype
             n_sem = out_semantics_grad.shape[-1]
+            shape = (num_elements, num_gaussians)
             return (
                 None,  # sample_points
-                torch.zeros((1, n_orig, 3), dtype=dtype, device=device),
-                torch.zeros((1, n_orig, 6), dtype=dtype, device=device),
-                torch.zeros((1, n_orig), dtype=dtype, device=device),
+                torch.zeros((*shape, 3), dtype=dtype, device=device),
+                torch.zeros((*shape, 6), dtype=dtype, device=device),
+                torch.zeros(shape, dtype=dtype, device=device),
                 None,  # gaussian_scales
-                torch.zeros((1, n_orig), dtype=dtype, device=device),
-                torch.zeros((1, n_orig, n_sem), dtype=dtype, device=device),
+                torch.zeros(shape, dtype=dtype, device=device),
+                torch.zeros((*shape, n_sem), dtype=dtype, device=device),
                 None,  # voxel_range
                 None,  # voxel_size
                 None,  # grid_size
@@ -262,11 +290,14 @@ class _AggregateFn(torch.autograd.Function):
                 None,  # min_radius
                 None,  # default_value
                 None,  # opacity_weighted
+                None,  # anisotropic_radii
             )
 
-        out_semantics_grad = out_semantics_grad.squeeze(0).contiguous()
-        out_occupancy_grad = out_occupancy_grad.squeeze(0).contiguous()
-        out_density_grad = out_density_grad.squeeze(0).contiguous()
+        out_semantics_grad = out_semantics_grad.reshape(
+            num_elements * num_points, -1
+        ).contiguous()
+        out_occupancy_grad = out_occupancy_grad.reshape(-1).contiguous()
+        out_density_grad = out_density_grad.reshape(-1).contiguous()
 
         h, w, d = ctx.h, ctx.w, ctx.d
         active_idx = ctx.active_idx
@@ -278,7 +309,9 @@ class _AggregateFn(torch.autograd.Function):
             pair_order,
             gaussian_means_int,
             gaussian_radii,
+            gaussian_elements,
             sample_points_int,
+            point_elements,
             sample_points,
             gaussian_means,
             gaussian_icovs,
@@ -303,7 +336,10 @@ class _AggregateFn(torch.autograd.Function):
             pair_order,
             gaussian_means_int,
             gaussian_radii,
+            gaussian_elements,
             sample_points_int,
+            point_elements,
+            num_elements,
             sample_points,
             gaussian_means,
             gaussian_icovs,
@@ -340,11 +376,11 @@ class _AggregateFn(torch.autograd.Function):
             opacities_grad = _scatter_back(opacities_grad)
             semantics_grad = _scatter_back(semantics_grad)
 
-        means_grad = means_grad.unsqueeze(0)
-        icovs_grad = icovs_grad.unsqueeze(0)
-        idets_grad = idets_grad.unsqueeze(0)
-        opacities_grad = opacities_grad.unsqueeze(0)
-        semantics_grad = semantics_grad.unsqueeze(0)
+        means_grad = means_grad.reshape(num_elements, num_gaussians, 3)
+        icovs_grad = icovs_grad.reshape(num_elements, num_gaussians, 6)
+        idets_grad = idets_grad.reshape(num_elements, num_gaussians)
+        opacities_grad = opacities_grad.reshape(num_elements, num_gaussians)
+        semantics_grad = semantics_grad.reshape(num_elements, num_gaussians, -1)
 
         return (
             None,  # sample_points

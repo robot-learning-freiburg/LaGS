@@ -101,32 +101,24 @@ class GaussianSemanticAggregator(nn.Module):
 
         cov_inv, det_inv = _inverse_covariance(scales, rotations)
 
-        # for each layer, aggregate the gaussians
-        out_scores, out_bin_scores, out_density, out_prob_sum = [], [], [], []
-        for layer in range(n_layers):
-            layer_scores, layer_bin_scores, layer_density, layer_prob_sum = (
-                self.aggregator(
-                    sample_points=coords,
-                    gaussian_means=centers[:, layer],
-                    gaussian_icovs=cov_inv[:, layer],
-                    gaussian_idets=det_inv[:, layer],
-                    gaussian_scales=scales[:, layer],
-                    gaussian_opacities=opacities[:, layer],
-                    gaussian_semantics=scores[:, layer],
-                    default_value=1.0 / n_classes,
-                )
-            )
+        # Aggregate all layers in one batched call: the op treats the leading dim as
+        # independent elements over a shared grid, so the layers (times the batch,
+        # once batch size > 1 is supported here) go through one splat together.
+        sem_scores, bin_scores, density, prob_sum = self.aggregator(
+            sample_points=coords.expand(b * n_layers, -1, -1),
+            gaussian_means=centers.flatten(0, 1),
+            gaussian_icovs=cov_inv.flatten(0, 1),
+            gaussian_idets=det_inv.flatten(0, 1),
+            gaussian_scales=scales.flatten(0, 1),
+            gaussian_opacities=opacities.flatten(0, 1),
+            gaussian_semantics=scores.flatten(0, 1),
+            default_value=1.0 / n_classes,
+        )
 
-            out_scores.append(layer_scores)
-            out_bin_scores.append(layer_bin_scores)
-            out_density.append(layer_density)
-            out_prob_sum.append(layer_prob_sum)
-
-        # stack the results
-        sem_scores = torch.stack(out_scores, dim=1)  # [b, l, n, c]
-        bin_scores = torch.stack(out_bin_scores, dim=1)  # [b, l, n, 1]
-        density = torch.stack(out_density, dim=1)  # [b, l, n]
-        prob_sum = torch.stack(out_prob_sum, dim=1)  # [b, l, n]
+        sem_scores = sem_scores.reshape(b, n_layers, *sem_scores.shape[1:])
+        bin_scores = bin_scores.reshape(b, n_layers, *bin_scores.shape[1:])
+        density = density.reshape(b, n_layers, *density.shape[1:])
+        prob_sum = prob_sum.reshape(b, n_layers, *prob_sum.shape[1:])
 
         # combine semantic and geometric/occupancy scores
         all_scores = _gate_scores(sem_scores, bin_scores)
