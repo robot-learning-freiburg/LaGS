@@ -129,7 +129,7 @@ def _build_icovs_idets(scales, rot):
     return icovs, idets
 
 
-def _call_kernel(scene, opacity_weighted):
+def _call_kernel(scene, opacity_weighted, anisotropic_radii=False):
     """Invoke the op under test, adding the batch dim it expects."""
     voxel_range = torch.tensor(scene["voxel_range"], device=scene["means"].device)
     voxel_size = torch.tensor(VOXEL_SIZE, device=scene["means"].device)
@@ -149,14 +149,17 @@ def _call_kernel(scene, opacity_weighted):
         MIN_RADIUS,
         DEFAULT_VALUE,
         opacity_weighted,
+        anisotropic_radii,
     )
 
 
-def _splat_mask(scene):
+def _splat_mask(scene, anisotropic_radii=False):
     """[N, M] bool: which gaussians reach which sample points.
 
-    Mirrors get_rect() in the kernel plus the quantization in _AggregateFn.forward.
+    Mirrors get_rect() in the kernel plus the quantization in _AggregateFn.forward,
+    including its per-axis 3-sigma radii when anisotropic_radii is set.
     """
+    # pylint: disable=too-many-locals
     device = scene["means"].device
     grid_size = scene["grid_size"]
 
@@ -169,12 +172,27 @@ def _splat_mask(scene):
     means_int = ((scene["means"].detach() - vr[:3]) / vs).to(torch.int64)
     means_int = torch.minimum(torch.clamp(means_int, min=0), gs[None, :] - 1)
 
-    radii = (scene["scales"] * DISTANCE_THRESHOLD / vs).max(dim=-1).values
+    if anisotropic_radii:
+        icovs = scene["icovs"]
+        a11, a22, a33 = icovs[:, 0, 0], icovs[:, 1, 1], icovs[:, 2, 2]
+        a12, a23, a13 = icovs[:, 0, 1], icovs[:, 1, 2], icovs[:, 0, 2]
+        adj_diag = torch.stack(
+            [a22 * a33 - a23 * a23, a11 * a33 - a13 * a13, a11 * a22 - a12 * a12],
+            dim=-1,
+        )
+        sigma = torch.sqrt(torch.clamp(adj_diag / scene["idets"][:, None], min=0))
+        radii = sigma * DISTANCE_THRESHOLD / vs
+    else:
+        radii = (
+            (scene["scales"] * DISTANCE_THRESHOLD / vs).max(dim=-1, keepdim=True).values
+        )
+        radii = radii.expand(-1, 3)
+
     radii = torch.ceil(radii).to(torch.int64).clamp(min=MIN_RADIUS)
 
     zeros = torch.zeros(3, dtype=torch.int64, device=device)
-    rect_min = torch.clamp(means_int - radii[:, None], min=zeros, max=gs)
-    rect_max = torch.clamp(means_int + radii[:, None] + 1, min=zeros, max=gs)
+    rect_min = torch.clamp(means_int - radii, min=zeros, max=gs)
+    rect_max = torch.clamp(means_int + radii + 1, min=zeros, max=gs)
 
     inside = (pts_int[:, None, :] >= rect_min[None]) & (
         pts_int[:, None, :] < rect_max[None]
@@ -182,10 +200,10 @@ def _splat_mask(scene):
     return inside.all(dim=-1)
 
 
-def _dense_reference(scene, opacity_weighted):
+def _dense_reference(scene, opacity_weighted, anisotropic_radii=False):
     """Dense [N, M] restatement of the kernel forward; gradients come from autograd."""
     # pylint: disable=too-many-locals
-    mask = _splat_mask(scene)
+    mask = _splat_mask(scene, anisotropic_radii)
 
     d = scene["means"][None, :, :] - scene["sample_points"][:, None, :]
     dx, dy, dz = d.unbind(-1)
@@ -530,6 +548,76 @@ def test_large_channel_counts(num_channels, opacity_weighted):
 
     kernel_grads = run(lambda s: _call_kernel(s, opacity_weighted), batched=True)
     ref_grads = run(lambda s: _dense_reference(s, opacity_weighted), batched=False)
+
+    for name, got, want in zip(names, kernel_grads, ref_grads):
+        torch.testing.assert_close(
+            got, want, rtol=2e-3, atol=1e-5, msg=lambda m, n=name: f"{n} grad:\n{m}"
+        )
+
+
+@requires_cuda
+@pytest.mark.parametrize("opacity_weighted", [True, False])
+def test_anisotropic_radii_match_dense_reference(opacity_weighted):
+    """anisotropic_radii=True bounds each splat axis by its own 3-sigma extent.
+
+    The scene is rebuilt with strongly anisotropic scales so the per-axis boxes
+    genuinely differ from the default max-scale cubes, and the dense reference mirrors
+    the same radii quantisation, so this checks that the kernel touches exactly the
+    tightened voxel set, forward and backward.
+    """
+    # pylint: disable=too-many-locals
+    scene = _make_scene(num_gaussians=40, grid_size=(16, 16, 8), num_channels=18)
+
+    gen = torch.Generator(device="cuda").manual_seed(23)
+    scales = torch.rand(40, 3, generator=gen, device="cuda") * 0.45 + 0.15
+    scene["scales"] = scales
+    scene["icovs"], scene["idets"] = _build_icovs_idets(scales, scene["rotations"])
+
+    # Guard against the test silently degenerating into the isotropic one.
+    tight = _splat_mask(scene, anisotropic_radii=True)
+    assert (tight != _splat_mask(scene)).any(), "scene too isotropic to test anything"
+    assert (tight & ~_splat_mask(scene)).sum() == 0, "per-axis boxes must only shrink"
+
+    sem, occ, density, prob_sum = _call_kernel(
+        scene, opacity_weighted, anisotropic_radii=True
+    )
+    ref_sem, ref_occ, ref_density, ref_prob_sum = _dense_reference(
+        scene, opacity_weighted, anisotropic_radii=True
+    )
+
+    torch.testing.assert_close(sem[0], ref_sem, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(occ[0], ref_occ, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(density[0], ref_density, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(prob_sum[0], ref_prob_sum, rtol=1e-4, atol=1e-5)
+
+    gen = torch.Generator(device="cuda").manual_seed(29)
+    n_pts = scene["sample_points"].shape[0]
+    n_ch = scene["semantics"].shape[1]
+
+    grad_sem = torch.randn(n_pts, n_ch, generator=gen, device="cuda")
+    grad_occ = torch.randn(n_pts, generator=gen, device="cuda")
+    grad_density = torch.randn(n_pts, generator=gen, device="cuda")
+
+    names = ["means", "icovs", "idets", "opacities", "semantics"]
+
+    def run(fn, batched):
+        scn = dict(scene)
+        for name in names:
+            scn[name] = scene[name].clone().requires_grad_(True)
+        outs = fn(scn)
+        outs = [o[0] for o in outs] if batched else outs
+        return _grads(
+            outs[:3], [scn[n] for n in names], [grad_sem, grad_occ, grad_density]
+        )
+
+    kernel_grads = run(
+        lambda s: _call_kernel(s, opacity_weighted, anisotropic_radii=True),
+        batched=True,
+    )
+    ref_grads = run(
+        lambda s: _dense_reference(s, opacity_weighted, anisotropic_radii=True),
+        batched=False,
+    )
 
     for name, got, want in zip(names, kernel_grads, ref_grads):
         torch.testing.assert_close(

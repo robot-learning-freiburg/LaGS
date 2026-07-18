@@ -34,6 +34,7 @@ class _AggregateFn(torch.autograd.Function):
         min_radius: int,
         default_value: float,
         opacity_weighted: bool,
+        anisotropic_radii: bool,
     ):
         # pylint: disable=arguments-differ
         # pylint: disable=too-many-locals
@@ -69,10 +70,32 @@ class _AggregateFn(torch.autograd.Function):
         gaussian_means_int[..., 1].clamp_(min=0, max=w - 1)
         gaussian_means_int[..., 2].clamp_(min=0, max=d - 1)
 
-        gaussian_radii = gaussian_scales * distance_threshold / voxel_size
-        gaussian_radii = torch.max(gaussian_radii, dim=-1).values
+        # The kernel takes one splat radius per axis, in voxels. The default uses the
+        # largest scale for all three axes; anisotropic_radii bounds each axis by its
+        # own 3-sigma extent instead: sigma_i = sqrt(diag(Sigma)_i), and for the
+        # symmetric inverse diag(Sigma)_i = adj(icov)_ii / det(icov), with det(icov)
+        # supplied by the caller as gaussian_idets. That shrinks the splat boxes of
+        # anisotropic gaussians, at the cost of no longer touching the tail voxels
+        # beyond 3 sigma of the narrower axes, so results differ slightly there.
+        if anisotropic_radii:
+            a11, a22, a33, a12, a23, a13 = gaussian_icovs.unbind(-1)
+            adj_diag = torch.stack(
+                [
+                    a22 * a33 - a23 * a23,
+                    a11 * a33 - a13 * a13,
+                    a11 * a22 - a12 * a12,
+                ],
+                dim=-1,
+            )
+            sigma = torch.sqrt(torch.clamp(adj_diag / gaussian_idets[..., None], min=0))
+            gaussian_radii = sigma * distance_threshold / voxel_size
+        else:
+            gaussian_radii = gaussian_scales * distance_threshold / voxel_size
+            gaussian_radii = torch.max(gaussian_radii, dim=-1, keepdim=True).values
+            gaussian_radii = gaussian_radii.expand_as(gaussian_means)
+
         gaussian_radii = torch.ceil(gaussian_radii).to(torch.int)
-        gaussian_radii = torch.clamp(gaussian_radii, min=min_radius)
+        gaussian_radii = torch.clamp(gaussian_radii, min=min_radius).contiguous()
 
         sample_points = sample_points.squeeze(0)
         gaussian_means = gaussian_means.squeeze(0)
@@ -338,6 +361,7 @@ class _AggregateFn(torch.autograd.Function):
             None,  # min_radius
             None,  # default_value
             None,  # opacity_weighted
+            None,  # anisotropic_radii
         )
 
 
@@ -356,7 +380,9 @@ def aggregate(
     min_radius: int,
     default_value: float,
     opacity_weighted: bool = False,
+    anisotropic_radii: bool = False,
 ):
+    # pylint: disable=too-many-locals
     gaussian_icovs = gaussian_icovs.flatten(2)[..., [0, 4, 8, 1, 5, 2]]
 
     dtype = gaussian_means.dtype
@@ -385,6 +411,7 @@ def aggregate(
         min_radius,
         default_value,
         opacity_weighted,
+        anisotropic_radii,
     )
 
 
@@ -400,6 +427,7 @@ class Aggregator(nn.Module):
         voxel_size,
         min_radius=1,
         opacity_weighted=False,
+        anisotropic_radii=False,
     ):
         super().__init__()
 
@@ -407,6 +435,7 @@ class Aggregator(nn.Module):
         self.min_radius = min_radius
         self.grid_size = grid_size
         self.opacity_weighted = opacity_weighted
+        self.anisotropic_radii = anisotropic_radii
 
         voxel_range = torch.as_tensor(voxel_range, dtype=torch.float)
         voxel_size = torch.as_tensor(voxel_size, dtype=torch.float)
@@ -440,4 +469,5 @@ class Aggregator(nn.Module):
             self.min_radius,
             default_value,
             self.opacity_weighted,
+            self.anisotropic_radii,
         )

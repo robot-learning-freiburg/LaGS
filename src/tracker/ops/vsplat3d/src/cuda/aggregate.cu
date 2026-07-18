@@ -109,18 +109,18 @@ constexpr auto epsilon<at::BFloat16> = 1e-7f;
 
 template <typename T>
 __forceinline__ __device__ math::rect3<T> get_rect(
-    math::vec3<T> const& p, T const& radius, math::vec3<T> const& max)
+    math::vec3<T> const& p, math::vec3<T> const& radius, math::vec3<T> const& max)
 {
     return math::rect3<T>{
         .min = math::vec3<T>{
-            math::clamp(p.x - radius, T{0}, max.x),
-            math::clamp(p.y - radius, T{0}, max.y),
-            math::clamp(p.z - radius, T{0}, max.z),
+            math::clamp(p.x - radius.x, T{0}, max.x),
+            math::clamp(p.y - radius.y, T{0}, max.y),
+            math::clamp(p.z - radius.z, T{0}, max.z),
         },
         .max = math::vec3<T>{
-            math::clamp(p.x + radius + 1, T{0}, max.x),
-            math::clamp(p.y + radius + 1, T{0}, max.y),
-            math::clamp(p.z + radius + 1, T{0}, max.z),
+            math::clamp(p.x + radius.x + 1, T{0}, max.x),
+            math::clamp(p.y + radius.y + 1, T{0}, max.y),
+            math::clamp(p.z + radius.z + 1, T{0}, max.z),
         },
     };
 }
@@ -151,12 +151,12 @@ __forceinline__ __device__ math::rect3<T> get_brick_rect(math::rect3<T> const& r
 template <typename index_t>
 __forceinline__ __device__ bool splat_covers(
     math::vec3<index_t> const& cell,
-    index_t const radius,
+    math::vec3<index_t> const& radius,
     math::vec3<index_t> const& voxel)
 {
-    return voxel.x - cell.x <= radius && cell.x - voxel.x <= radius
-        && voxel.y - cell.y <= radius && cell.y - voxel.y <= radius
-        && voxel.z - cell.z <= radius && cell.z - voxel.z <= radius;
+    return voxel.x - cell.x <= radius.x && cell.x - voxel.x <= radius.x
+        && voxel.y - cell.y <= radius.y && cell.y - voxel.y <= radius.y
+        && voxel.z - cell.z <= radius.z && cell.z - voxel.z <= radius.z;
 }
 
 template <typename index_t>
@@ -169,7 +169,8 @@ __global__ void compute_gaussian_brick_counts(
 {
     CUDA_1D_KERNEL_LOOP(idx, num_gaussians) {
         auto const cell = math::vec3<index_t>::load(gaussian_cells + 3 * idx);
-        auto const rect = get_brick_rect(get_rect(cell, radii[idx], grid));
+        auto const rect = get_brick_rect(
+            get_rect(cell, math::vec3<index_t>::load(radii + 3 * idx), grid));
 
         counts[idx] = rect.size();
     }
@@ -197,7 +198,8 @@ __global__ void compute_gaussian_brick_pairs(
         index_t const end = offsets[i];
 
         auto const cell = math::vec3<index_t>::load(gaussian_cells + 3 * i);
-        auto const rect = get_brick_rect(get_rect(cell, radii[i], grid));
+        auto const rect = get_brick_rect(
+            get_rect(cell, math::vec3<index_t>::load(radii + 3 * i), grid));
 
         for (index_t j = start + tid_in_warp; j < end; j += C10_WARP_SIZE) {
             auto const local_idx = j - start;
@@ -287,7 +289,7 @@ __global__ void render_forward_bricks_registers(
     __shared__ float_t staged_idet[brick_volume];
     __shared__ float_t staged_opacity[brick_volume];
     __shared__ index_t staged_cell[3][brick_volume];
-    __shared__ index_t staged_radius[brick_volume];
+    __shared__ index_t staged_radius[3][brick_volume];
     __shared__ index_t staged_index[brick_volume];
 
     auto const tid = static_cast<index_t>(threadIdx.x);
@@ -345,11 +347,11 @@ __global__ void render_forward_bricks_registers(
                 staged_index[tid] = gs_idx;
                 staged_idet[tid] = gaussian_idets[gs_idx];
                 staged_opacity[tid] = gaussian_opacities[gs_idx];
-                staged_radius[tid] = gaussian_radii[gs_idx];
 
                 for (int k = 0; k < 3; k++) {
                     staged_mean[k][tid] = gaussian_means[3 * gs_idx + k];
                     staged_cell[k][tid] = gaussian_cells[3 * gs_idx + k];
+                    staged_radius[k][tid] = gaussian_radii[3 * gs_idx + k];
                 }
 
                 for (int k = 0; k < 6; k++) {
@@ -367,8 +369,10 @@ __global__ void render_forward_bricks_registers(
                     // The pair list is brick-level, so re-check per-voxel coverage.
                     auto const cell = math::vec3<index_t>{
                         staged_cell[0][j], staged_cell[1][j], staged_cell[2][j]};
+                    auto const radius = math::vec3<index_t>{
+                        staged_radius[0][j], staged_radius[1][j], staged_radius[2][j]};
 
-                    if (!splat_covers(cell, staged_radius[j], voxel))
+                    if (!splat_covers(cell, radius, voxel))
                         continue;
 
                     auto const mean = math::vec3<float_t>{
@@ -470,7 +474,7 @@ __global__ void render_forward_bricks_global_memory(
     __shared__ float_t staged_idet[brick_volume];
     __shared__ float_t staged_opacity[brick_volume];
     __shared__ index_t staged_cell[3][brick_volume];
-    __shared__ index_t staged_radius[brick_volume];
+    __shared__ index_t staged_radius[3][brick_volume];
     __shared__ index_t staged_index[brick_volume];
 
     auto const tid = static_cast<index_t>(threadIdx.x);
@@ -531,11 +535,11 @@ __global__ void render_forward_bricks_global_memory(
                 staged_index[tid] = gs_idx;
                 staged_idet[tid] = gaussian_idets[gs_idx];
                 staged_opacity[tid] = gaussian_opacities[gs_idx];
-                staged_radius[tid] = gaussian_radii[gs_idx];
 
                 for (int k = 0; k < 3; k++) {
                     staged_mean[k][tid] = gaussian_means[3 * gs_idx + k];
                     staged_cell[k][tid] = gaussian_cells[3 * gs_idx + k];
+                    staged_radius[k][tid] = gaussian_radii[3 * gs_idx + k];
                 }
 
                 for (int k = 0; k < 6; k++) {
@@ -552,8 +556,10 @@ __global__ void render_forward_bricks_global_memory(
                 for (index_t j = 0; j < num_staged; j++) {
                     auto const cell = math::vec3<index_t>{
                         staged_cell[0][j], staged_cell[1][j], staged_cell[2][j]};
+                    auto const radius = math::vec3<index_t>{
+                        staged_radius[0][j], staged_radius[1][j], staged_radius[2][j]};
 
-                    if (!splat_covers(cell, staged_radius[j], voxel))
+                    if (!splat_covers(cell, radius, voxel))
                         continue;
 
                     auto const mean = math::vec3<float_t>{
@@ -667,7 +673,7 @@ __global__ void render_forward_remainder(
 
             auto const cell = math::vec3<index_t>::load(gaussian_cells + 3 * gs_idx);
 
-            if (!splat_covers(cell, gaussian_radii[gs_idx], point_int))
+            if (!splat_covers(cell, math::vec3<index_t>::load(gaussian_radii + 3 * gs_idx), point_int))
                 continue;
 
             auto const mean = math::vec3<float_t>::load(gaussian_means + gs_idx * 3);
@@ -753,7 +759,7 @@ __global__ void render_backward_bricks(
         auto const opa = gaussian_opacities[idx];
 
         auto const cell = math::vec3<index_t>::load(gaussian_cells + 3 * idx);
-        auto const radius = gaussian_radii[idx];
+        auto const radius = math::vec3<index_t>::load(gaussian_radii + 3 * idx);
 
         auto const sem_base = idx * num_channels;
 
@@ -1025,7 +1031,8 @@ __global__ void render_backward_warps(
         auto const opa = gaussian_opacities[idx];
 
         auto const cell = math::vec3<index_t>::load(gaussian_cells + 3 * idx);
-        auto const rect = get_rect(cell, gaussian_radii[idx], grid_size);
+        auto const rect = get_rect(
+            cell, math::vec3<index_t>::load(gaussian_radii + 3 * idx), grid_size);
 
         auto const sem_base = idx * num_channels;
 
@@ -1212,7 +1219,8 @@ __global__ void render_backward_global_memory(
         auto const opa = gaussian_opacities[idx];
 
         auto const cell = math::vec3<index_t>::load(gaussian_cells + 3 * idx);
-        auto const rect = get_rect(cell, gaussian_radii[idx], grid_size);
+        auto const rect = get_rect(
+            cell, math::vec3<index_t>::load(gaussian_radii + 3 * idx), grid_size);
 
         auto const sem_base = idx * num_channels;
         auto const p_sem_grad = g_semantics_grad + idx * num_channels;

@@ -43,6 +43,7 @@ class GaussianSemanticAggregator(nn.Module):
         scale_multiplier: float = 5.0,
         min_radius: int = 1,
         opacity_weighted: bool = False,
+        anisotropic_radii: bool = False,
     ):
         super().__init__()
 
@@ -63,6 +64,7 @@ class GaussianSemanticAggregator(nn.Module):
             voxel_size=self.voxel_size,
             min_radius=min_radius,
             opacity_weighted=opacity_weighted,
+            anisotropic_radii=anisotropic_radii,
         )
 
     @torch.autocast("cuda", enabled=False)
@@ -144,6 +146,7 @@ class GaussianFeatureAggregator(nn.Module):
         default_value: float = 0.0,
         min_radius: int = 1,
         opacity_weighted: bool = False,
+        anisotropic_radii: bool = False,
     ):
         super().__init__()
 
@@ -165,6 +168,7 @@ class GaussianFeatureAggregator(nn.Module):
             voxel_size=self.voxel_size,
             min_radius=min_radius,
             opacity_weighted=opacity_weighted,
+            anisotropic_radii=anisotropic_radii,
         )
 
     @torch.autocast("cuda", enabled=False)

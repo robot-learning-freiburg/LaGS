@@ -15,7 +15,7 @@ import torch
 @torch.no_grad()
 def compute_gaussian_voxel_index_pairs(
     center_index: torch.Tensor,  # [N, 3], int
-    radius: torch.Tensor,  # [N], int
+    radius: torch.Tensor,  # [N] or [N, 3], int
     grid_size: torch.Tensor,  # [3], int
 ):
     # pylint: disable=too-many-locals
@@ -23,11 +23,16 @@ def compute_gaussian_voxel_index_pairs(
     device = center_index.device
     num_gaussians = center_index.shape[0]
 
+    # A scalar radius applies to all three axes; the kernel's anisotropic_radii mode
+    # supplies one radius per axis instead.
+    if radius.dim() == 1:
+        radius = radius[:, None].expand(-1, 3)
+
     # Compute the bounding box for each gaussian
     zeros = torch.zeros(3, dtype=torch.int64, device=device)
 
-    rect_min = center_index[:, :] - radius[:, None]
-    rect_max = center_index[:, :] + radius[:, None] + 1
+    rect_min = center_index[:, :] - radius
+    rect_max = center_index[:, :] + radius + 1
 
     rect_min = torch.clamp(rect_min, min=zeros[None, :], max=grid_size[None, :])
     rect_max = torch.clamp(rect_max, min=zeros[None, :], max=grid_size[None, :])
@@ -278,7 +283,7 @@ def render(
     gaussian_invcov: torch.Tensor,  # [M, 3, 3], float
     gaussian_opacities: torch.Tensor,  # [M], float
     gaussian_semantics: torch.Tensor,  # [M, C], float
-    gaussian_radii: torch.Tensor,  # [M], int
+    gaussian_radii: torch.Tensor,  # [M] or [M, 3], int
     grid_size: torch.Tensor,  # [3], int
     default_value: float = 0.0,
     opacity_weighted: bool = False,
