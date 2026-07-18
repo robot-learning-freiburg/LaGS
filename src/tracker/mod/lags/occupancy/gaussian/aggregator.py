@@ -7,6 +7,30 @@ from torch import nn
 from ..... import ops, utils
 from .utils import quaternion_to_rotation_matrix
 
+# The chains below are pure pointwise math (plus small matmuls), which eager mode runs
+# as one kernel launch per op; compiling fuses them. At 640k voxels the score gating
+# alone is worth ~1 ms per step on an RTX 4060 Ti.
+
+
+@torch.compile
+def _inverse_covariance(scales: torch.Tensor, rotations: torch.Tensor):
+    """cov_inv = R S^(-2) R^T and its determinant, from scales and quaternions."""
+    m_scale_inv_sq = torch.diag_embed(1.0 / (scales * scales))  # S^(-2)
+    m_rot = quaternion_to_rotation_matrix(rotations)  # R
+
+    cov_inv = torch.matmul(m_rot, torch.matmul(m_scale_inv_sq, m_rot.transpose(-1, -2)))
+    det_inv = 1.0 / torch.prod(scales**2, dim=-1)
+
+    return cov_inv, det_inv
+
+
+@torch.compile
+def _gate_scores(sem_scores: torch.Tensor, bin_scores: torch.Tensor) -> torch.Tensor:
+    """Combine semantic and geometric/occupancy scores into per-class + free scores."""
+    sem_score = sem_scores * bin_scores[..., None]
+    free_score = 1 - bin_scores[..., None]
+    return torch.cat([sem_score, free_score], dim=-1)
+
 
 class GaussianSemanticAggregator(nn.Module):
     # buffers
@@ -73,19 +97,7 @@ class GaussianSemanticAggregator(nn.Module):
         rotations = utils.torch.amp.upcast(rotations, dtype=torch.float32)
         opacities = utils.torch.amp.upcast(opacities, dtype=torch.float32)
 
-        # direct computation of inverse:
-        m_scale_inv_sq = 1.0 / (scales * scales)
-        m_scale_inv_sq = torch.diag_embed(m_scale_inv_sq)  # S^(-2)
-
-        m_rot = quaternion_to_rotation_matrix(rotations)  # R
-
-        # cov_inv = R S^(-2) R^T
-        cov_inv = torch.matmul(
-            m_rot, torch.matmul(m_scale_inv_sq, m_rot.transpose(-1, -2))
-        )
-
-        # directly compute (inverse) determinant
-        det_inv = 1.0 / torch.prod(scales**2, dim=-1)
+        cov_inv, det_inv = _inverse_covariance(scales, rotations)
 
         # for each layer, aggregate the gaussians
         out_scores, out_bin_scores, out_density, out_prob_sum = [], [], [], []
@@ -115,9 +127,7 @@ class GaussianSemanticAggregator(nn.Module):
         prob_sum = torch.stack(out_prob_sum, dim=1)  # [b, l, n]
 
         # combine semantic and geometric/occupancy scores
-        sem_score = sem_scores * bin_scores[..., None]
-        free_score = 1 - bin_scores[..., None]
-        all_scores = torch.cat([sem_score, free_score], dim=-1)
+        all_scores = _gate_scores(sem_scores, bin_scores)
 
         return all_scores, bin_scores, density, prob_sum
 
@@ -184,19 +194,7 @@ class GaussianFeatureAggregator(nn.Module):
         rotations = utils.torch.amp.upcast(rotations, dtype=torch.float32)
         opacities = utils.torch.amp.upcast(opacities, dtype=torch.float32)
 
-        # direct computation of inverse:
-        m_scale_inv_sq = 1.0 / (scales * scales)
-        m_scale_inv_sq = torch.diag_embed(m_scale_inv_sq)  # S^(-2)
-
-        m_rot = quaternion_to_rotation_matrix(rotations)  # R
-
-        # cov_inv = R S^(-2) R^T
-        cov_inv = torch.matmul(
-            m_rot, torch.matmul(m_scale_inv_sq, m_rot.transpose(-1, -2))
-        )
-
-        # directly compute (inverse) determinant
-        det_inv = 1.0 / torch.prod(scales**2, dim=-1)
+        cov_inv, det_inv = _inverse_covariance(scales, rotations)
 
         # aggregate the gaussians
         features, bin_scores, density, prob_sum = self.aggregator(

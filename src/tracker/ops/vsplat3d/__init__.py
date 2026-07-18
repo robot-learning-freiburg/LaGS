@@ -59,12 +59,8 @@ class _AggregateFn(torch.autograd.Function):
         sample_points_int = (sample_points - voxel_range[:3]) / voxel_size
         sample_points_int = sample_points_int.to(torch.int)
 
-        assert sample_points_int[..., 0].min() >= 0
-        assert sample_points_int[..., 1].min() >= 0
-        assert sample_points_int[..., 2].min() >= 0
-        assert sample_points_int[..., 0].max() < h
-        assert sample_points_int[..., 1].max() < w
-        assert sample_points_int[..., 2].max() < d
+        grid_max = torch.tensor([h, w, d], device=device)
+        in_bounds = ((sample_points_int >= 0) & (sample_points_int < grid_max)).all()
 
         gaussian_means_int = utils.torch.amp.upcast(gaussian_means, torch.float32)
         gaussian_means_int = (gaussian_means_int - voxel_range[:3]) / voxel_size
@@ -96,9 +92,16 @@ class _AggregateFn(torch.autograd.Function):
         # gaussian still contributes and dropping it here alters the result.
         n_orig = gaussian_means.shape[0]
         active_mask = gaussian_opacities > 0
+
+        # One combined host readback: read separately, the bounds check and the filter
+        # decision would each synchronize with the device (the per-axis asserts this
+        # covers used to cost six syncs per call).
+        in_bounds, all_active = torch.stack([in_bounds, active_mask.all()]).tolist()
+        assert in_bounds, "sample points must lie inside the voxel grid"
+
         active_idx = None
 
-        if not active_mask.all():
+        if not all_active:
             active_idx = active_mask.nonzero(as_tuple=True)[0]
 
             # All gaussians filtered out — return defaults without calling kernel
