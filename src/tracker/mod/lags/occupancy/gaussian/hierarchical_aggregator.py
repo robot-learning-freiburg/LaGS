@@ -48,6 +48,7 @@ class HierarchicalGaussianAggregator(nn.Module):
         num_channels: int | None = None,
         min_radius: int = 1,
         opacity_weighted: bool = False,
+        anisotropic_radii: bool = False,
     ):
         super().__init__()
 
@@ -70,6 +71,7 @@ class HierarchicalGaussianAggregator(nn.Module):
                     scale_multiplier=scale_multiplier[name],
                     min_radius=min_radius,
                     opacity_weighted=opacity_weighted,
+                    anisotropic_radii=anisotropic_radii,
                 )
                 for name in streams
             }
