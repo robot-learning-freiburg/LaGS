@@ -23,7 +23,6 @@ class _AggregateFn(torch.autograd.Function):
         sample_points: torch.Tensor,
         gaussian_means: torch.Tensor,
         gaussian_icovs: torch.Tensor,
-        gaussian_idets: torch.Tensor,
         gaussian_scales: torch.Tensor,
         gaussian_opacities: torch.Tensor,
         gaussian_semantics: torch.Tensor,
@@ -77,10 +76,9 @@ class _AggregateFn(torch.autograd.Function):
         # The kernel takes one splat radius per axis, in voxels. The default uses the
         # largest scale for all three axes; anisotropic_radii bounds each axis by its
         # own 3-sigma extent instead: sigma_i = sqrt(diag(Sigma)_i), and for the
-        # symmetric inverse diag(Sigma)_i = adj(icov)_ii / det(icov), with det(icov)
-        # supplied by the caller as gaussian_idets. That shrinks the splat boxes of
-        # anisotropic gaussians, at the cost of no longer touching the tail voxels
-        # beyond 3 sigma of the narrower axes, so results differ slightly there.
+        # symmetric inverse diag(Sigma)_i = adj(icov)_ii / det(icov). That shrinks the
+        # splat boxes of anisotropic gaussians, at the cost of no longer touching the
+        # tail voxels beyond 3 sigma of the narrower axes, so results differ there.
         if anisotropic_radii:
             a11, a22, a33, a12, a23, a13 = gaussian_icovs.unbind(-1)
             adj_diag = torch.stack(
@@ -91,7 +89,9 @@ class _AggregateFn(torch.autograd.Function):
                 ],
                 dim=-1,
             )
-            sigma = torch.sqrt(torch.clamp(adj_diag / gaussian_idets[..., None], min=0))
+            det = a11 * adj_diag[..., 0] - a12 * (a12 * a33 - a23 * a13)
+            det = det + a13 * (a12 * a23 - a22 * a13)
+            sigma = torch.sqrt(torch.clamp(adj_diag / det[..., None], min=0))
             gaussian_radii = sigma * distance_threshold / voxel_size
         else:
             gaussian_radii = gaussian_scales * distance_threshold / voxel_size
@@ -106,7 +106,6 @@ class _AggregateFn(torch.autograd.Function):
         sample_points = sample_points.reshape(-1, 3)
         gaussian_means = gaussian_means.reshape(-1, 3)
         gaussian_icovs = gaussian_icovs.reshape(-1, 6)
-        gaussian_idets = gaussian_idets.reshape(-1)
         gaussian_opacities = gaussian_opacities.reshape(-1)
         gaussian_semantics = gaussian_semantics.reshape(
             num_elements * num_gaussians, -1
@@ -181,7 +180,6 @@ class _AggregateFn(torch.autograd.Function):
 
             gaussian_means = gaussian_means[active_idx]
             gaussian_icovs = gaussian_icovs[active_idx]
-            gaussian_idets = gaussian_idets[active_idx]
             gaussian_opacities = gaussian_opacities[active_idx]
             gaussian_semantics = gaussian_semantics[active_idx]
             gaussian_means_int = gaussian_means_int[active_idx]
@@ -201,7 +199,6 @@ class _AggregateFn(torch.autograd.Function):
             sample_points,
             gaussian_means,
             gaussian_icovs,
-            gaussian_idets,
             gaussian_opacities,
             gaussian_semantics,
             sample_points_int,
@@ -241,7 +238,6 @@ class _AggregateFn(torch.autograd.Function):
             sample_points,
             gaussian_means,
             gaussian_icovs,
-            gaussian_idets,
             gaussian_opacities,
             gaussian_semantics,
             out_semantics,
@@ -279,7 +275,6 @@ class _AggregateFn(torch.autograd.Function):
                 None,  # sample_points
                 torch.zeros((*shape, 3), dtype=dtype, device=device),
                 torch.zeros((*shape, 6), dtype=dtype, device=device),
-                torch.zeros(shape, dtype=dtype, device=device),
                 None,  # gaussian_scales
                 torch.zeros(shape, dtype=dtype, device=device),
                 torch.zeros((*shape, n_sem), dtype=dtype, device=device),
@@ -315,7 +310,6 @@ class _AggregateFn(torch.autograd.Function):
             sample_points,
             gaussian_means,
             gaussian_icovs,
-            gaussian_idets,
             gaussian_opacities,
             gaussian_semantics,
             out_semantics,
@@ -326,7 +320,6 @@ class _AggregateFn(torch.autograd.Function):
         (
             means_grad,
             icovs_grad,
-            idets_grad,
             opacities_grad,
             semantics_grad,
         ) = _aggregate_backward(
@@ -343,7 +336,6 @@ class _AggregateFn(torch.autograd.Function):
             sample_points,
             gaussian_means,
             gaussian_icovs,
-            gaussian_idets,
             gaussian_opacities,
             gaussian_semantics,
             out_semantics,
@@ -372,13 +364,11 @@ class _AggregateFn(torch.autograd.Function):
 
             means_grad = _scatter_back(means_grad)
             icovs_grad = _scatter_back(icovs_grad)
-            idets_grad = _scatter_back(idets_grad)
             opacities_grad = _scatter_back(opacities_grad)
             semantics_grad = _scatter_back(semantics_grad)
 
         means_grad = means_grad.reshape(num_elements, num_gaussians, 3)
         icovs_grad = icovs_grad.reshape(num_elements, num_gaussians, 6)
-        idets_grad = idets_grad.reshape(num_elements, num_gaussians)
         opacities_grad = opacities_grad.reshape(num_elements, num_gaussians)
         semantics_grad = semantics_grad.reshape(num_elements, num_gaussians, -1)
 
@@ -386,7 +376,6 @@ class _AggregateFn(torch.autograd.Function):
             None,  # sample_points
             means_grad,  # gaussian_means
             icovs_grad,  # gaussian_icovs
-            idets_grad,  # gaussian_idets
             None,  # gaussian_scales
             opacities_grad,  # gaussian_opacities
             semantics_grad,  # gaussian_semantics
@@ -405,7 +394,6 @@ def aggregate(
     sample_points: torch.Tensor,
     gaussian_means: torch.Tensor,
     gaussian_icovs: torch.Tensor,
-    gaussian_idets: torch.Tensor,
     gaussian_scales: torch.Tensor,
     gaussian_opacities: torch.Tensor,
     gaussian_semantics: torch.Tensor,
@@ -425,7 +413,6 @@ def aggregate(
 
     sample_points = sample_points.to(dtype)
     gaussian_icovs = gaussian_icovs.to(dtype)
-    gaussian_idets = gaussian_idets.to(dtype)
     gaussian_scales = gaussian_scales.to(dtype)
     gaussian_opacities = gaussian_opacities.to(dtype)
 
@@ -436,7 +423,6 @@ def aggregate(
         sample_points,
         gaussian_means,
         gaussian_icovs,
-        gaussian_idets,
         gaussian_scales,
         gaussian_opacities,
         gaussian_semantics,
@@ -484,7 +470,6 @@ class Aggregator(nn.Module):
         sample_points: torch.Tensor,
         gaussian_means: torch.Tensor,
         gaussian_icovs: torch.Tensor,
-        gaussian_idets: torch.Tensor,
         gaussian_scales: torch.Tensor,
         gaussian_opacities: torch.Tensor,
         gaussian_semantics: torch.Tensor,
@@ -494,7 +479,6 @@ class Aggregator(nn.Module):
             sample_points,
             gaussian_means,
             gaussian_icovs,
-            gaussian_idets,
             gaussian_scales,
             gaussian_opacities,
             gaussian_semantics,

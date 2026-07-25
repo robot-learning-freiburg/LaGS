@@ -21,7 +21,6 @@ namespace vsplat3d
             const torch::Tensor &sample_points,
             const torch::Tensor &gaussian_means,
             const torch::Tensor &gaussian_icovs,
-            const torch::Tensor &gaussian_idets,
             const torch::Tensor &gaussian_opacities,
             const torch::Tensor &gaussian_semantics,
             const torch::Tensor &sample_points_int,
@@ -36,7 +35,7 @@ namespace vsplat3d
             const double default_value,
             const bool opacity_weighted);
 
-        std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+        std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
         agregate_backward(
             const torch::Tensor &pair_offsets,
             const torch::Tensor &pair_gaussians,
@@ -51,7 +50,6 @@ namespace vsplat3d
             const torch::Tensor &sample_points,
             const torch::Tensor &gaussian_means,
             const torch::Tensor &gaussian_icovs,
-            const torch::Tensor &gaussian_idets,
             const torch::Tensor &gaussian_opacities,
             const torch::Tensor &gaussian_semantics,
             const torch::Tensor &out_semantics,

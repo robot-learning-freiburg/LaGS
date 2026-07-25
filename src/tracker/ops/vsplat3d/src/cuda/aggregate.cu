@@ -88,8 +88,8 @@ constexpr int brick_edge = 4;
 constexpr int brick_volume = brick_edge * brick_edge * brick_edge;
 
 // Per-pair gradient components outside the semantic channels:
-// 3 (mean) + 6 (icov) + 1 (idet) + 1 (opacity).
-constexpr int num_geometry_grads = 11;
+// 3 (mean) + 6 (icov) + 1 (opacity).
+constexpr int num_geometry_grads = 10;
 
 template<typename T>
 constexpr auto epsilon = T{1e-8};
@@ -272,7 +272,6 @@ __global__ void render_forward_bricks_registers(
     float_t const* __restrict__ sample_points,
     float_t const* __restrict__ gaussian_means,
     float_t const* __restrict__ gaussian_icovs,
-    float_t const* __restrict__ gaussian_idets,
     float_t const* __restrict__ gaussian_opacities,
     data_t const* __restrict__ gaussian_semantics,
     index_t const* __restrict__ gaussian_cells,
@@ -358,7 +357,6 @@ __global__ void render_forward_bricks_registers(
                 auto const gs_idx = pair_gaussians[pair_order[chunk + tid]];
 
                 staged_index[tid] = gs_idx;
-                staged_idet[tid] = gaussian_idets[gs_idx];
                 staged_opacity[tid] = gaussian_opacities[gs_idx];
 
                 for (int k = 0; k < 3; k++) {
@@ -367,9 +365,19 @@ __global__ void render_forward_bricks_registers(
                     staged_radius[k][tid] = gaussian_radii[3 * gs_idx + k];
                 }
 
-                for (int k = 0; k < 6; k++) {
-                    staged_icov[k][tid] = gaussian_icovs[6 * gs_idx + k];
-                }
+                auto const staged_cov = math::smat3<float_t>::load(
+                    gaussian_icovs + 6 * gs_idx);
+
+                staged_icov[0][tid] = staged_cov.a11;
+                staged_icov[1][tid] = staged_cov.a22;
+                staged_icov[2][tid] = staged_cov.a33;
+                staged_icov[3][tid] = staged_cov.a12;
+                staged_icov[4][tid] = staged_cov.a23;
+                staged_icov[5][tid] = staged_cov.a13;
+
+                // Computed once per gaussian per brick rather than per voxel: every
+                // thread of the block would otherwise redo the same determinant.
+                staged_idet[tid] = staged_cov.det();
             }
             __syncthreads();
 
@@ -464,7 +472,6 @@ __global__ void render_forward_bricks_global_memory(
     float_t const* __restrict__ sample_points,
     float_t const* __restrict__ gaussian_means,
     float_t const* __restrict__ gaussian_icovs,
-    float_t const* __restrict__ gaussian_idets,
     float_t const* __restrict__ gaussian_opacities,
     data_t const* __restrict__ gaussian_semantics,
     index_t const* __restrict__ gaussian_cells,
@@ -551,7 +558,6 @@ __global__ void render_forward_bricks_global_memory(
                 auto const gs_idx = pair_gaussians[pair_order[chunk + tid]];
 
                 staged_index[tid] = gs_idx;
-                staged_idet[tid] = gaussian_idets[gs_idx];
                 staged_opacity[tid] = gaussian_opacities[gs_idx];
 
                 for (int k = 0; k < 3; k++) {
@@ -560,9 +566,19 @@ __global__ void render_forward_bricks_global_memory(
                     staged_radius[k][tid] = gaussian_radii[3 * gs_idx + k];
                 }
 
-                for (int k = 0; k < 6; k++) {
-                    staged_icov[k][tid] = gaussian_icovs[6 * gs_idx + k];
-                }
+                auto const staged_cov = math::smat3<float_t>::load(
+                    gaussian_icovs + 6 * gs_idx);
+
+                staged_icov[0][tid] = staged_cov.a11;
+                staged_icov[1][tid] = staged_cov.a22;
+                staged_icov[2][tid] = staged_cov.a33;
+                staged_icov[3][tid] = staged_cov.a12;
+                staged_icov[4][tid] = staged_cov.a23;
+                staged_icov[5][tid] = staged_cov.a13;
+
+                // Computed once per gaussian per brick rather than per voxel: every
+                // thread of the block would otherwise redo the same determinant.
+                staged_idet[tid] = staged_cov.det();
             }
             __syncthreads();
 
@@ -639,7 +655,6 @@ __global__ void render_forward_remainder(
     index_t const* __restrict__ point_elements,
     float_t const* __restrict__ gaussian_means,
     float_t const* __restrict__ gaussian_icovs,
-    float_t const* __restrict__ gaussian_idets,
     float_t const* __restrict__ gaussian_opacities,
     data_t const* __restrict__ gaussian_semantics,
     index_t const* __restrict__ gaussian_cells,
@@ -702,7 +717,7 @@ __global__ void render_forward_remainder(
 
             auto const mean = math::vec3<float_t>::load(gaussian_means + gs_idx * 3);
             auto const cov = math::smat3<float_t>::load(gaussian_icovs + gs_idx * 6);
-            auto const deter = gaussian_idets[gs_idx];
+            auto const deter = cov.det();
             auto const opacity = gaussian_opacities[gs_idx];
 
             auto const power = __expf(cov.neg_half_quadratic(mean - point));
@@ -755,7 +770,6 @@ __global__ void render_backward_bricks(
     float_t const* __restrict__ sample_points,
     float_t const* __restrict__ gaussian_means,
     float_t const* __restrict__ gaussian_icovs,
-    float_t const* __restrict__ gaussian_idets,
     float_t const* __restrict__ gaussian_opacities,
     data_t const* __restrict__ gaussian_semantics,
     index_t const* __restrict__ gaussian_cells,
@@ -784,7 +798,8 @@ __global__ void render_backward_bricks(
 
         auto const mean = math::vec3<float_t>::load(gaussian_means + 3 * idx);
         auto const cov = math::smat3<float_t>::load(gaussian_icovs + 6 * idx);
-        auto const deter = gaussian_idets[idx];
+        auto const deter = cov.det();
+        auto const deter_cofactor = cov.det_grad();
         auto const opa = gaussian_opacities[idx];
 
         auto const cell = math::vec3<index_t>::load(gaussian_cells + 3 * idx);
@@ -804,7 +819,7 @@ __global__ void render_backward_bricks(
         float_t means_grad[3] = {0};
         float_t opa_grad = 0;
         float_t cov_grad[6] = {0};
-        float_t idets_grad = 0;
+        float_t deter_grad_total = 0;
 
         auto const brick_x = brick / (brick_grid.y * brick_grid.z);
         auto const brick_y = (brick / brick_grid.z) % brick_grid.y;
@@ -904,17 +919,13 @@ __global__ void render_backward_bricks(
                 }
 
                 deter_grad += prob_grad * prob / 2 / deter;
-                idets_grad += deter_grad;
+                deter_grad_total += deter_grad;
 
                 auto const power_grad_times_power = power_grad * power;
                 means_grad[0] -= power_grad_times_power * (cov.a11 * d.x + cov.a12 * d.y + cov.a13 * d.z);
                 means_grad[1] -= power_grad_times_power * (cov.a12 * d.x + cov.a22 * d.y + cov.a23 * d.z);
                 means_grad[2] -= power_grad_times_power * (cov.a13 * d.x + cov.a23 * d.y + cov.a33 * d.z);
 
-                // Note: the forward takes the determinant as the separate gaussian_idets
-                // input and never computes det(cov), so d(deter)/d(cov) = 0 and there is no
-                // determinant term here. It reaches the caller solely via idets_grad.
-                //
                 // The factor of 2 on the off-diagonals comes from the quadratic form:
                 // q = dx^2 a11 + dy^2 a22 + dz^2 a33 + 2 (dx dy a12 + dy dz a23 + dz dx a13).
                 cov_grad[0] += power_grad_times_power * (-0.5 * d.x * d.x);
@@ -926,6 +937,18 @@ __global__ void render_backward_bricks(
             }
         }
 
+        // The covariance also reaches the output through the determinant, which the
+        // forward computes from this same matrix, so that path belongs in cov_grad
+        // too. The cofactor depends only on the covariance, so it is applied once
+        // here rather than per voxel, and det_grad() carries the same factor of 2 on
+        // the off-diagonals as the quadratic form above.
+        cov_grad[0] += deter_grad_total * deter_cofactor.a11;
+        cov_grad[1] += deter_grad_total * deter_cofactor.a22;
+        cov_grad[2] += deter_grad_total * deter_cofactor.a33;
+        cov_grad[3] += deter_grad_total * deter_cofactor.a12;
+        cov_grad[4] += deter_grad_total * deter_cofactor.a23;
+        cov_grad[5] += deter_grad_total * deter_cofactor.a13;
+
         auto const p_geom = partial_geometry + slot * num_geometry_grads;
         p_geom[0] = means_grad[0];
         p_geom[1] = means_grad[1];
@@ -936,8 +959,7 @@ __global__ void render_backward_bricks(
         p_geom[6] = cov_grad[3];
         p_geom[7] = cov_grad[4];
         p_geom[8] = cov_grad[5];
-        p_geom[9] = idets_grad;
-        p_geom[10] = opa_grad;
+        p_geom[9] = opa_grad;
 
         auto const p_sem = partial_semantics + slot * num_channels;
 
@@ -968,7 +990,6 @@ __global__ void reduce_backward_partials(
     data_t const* __restrict__ partial_semantics,
     float_t* __restrict__ g_means_grad,
     float_t* __restrict__ g_icov_grad,
-    float_t* __restrict__ g_idets_grad,
     float_t* __restrict__ g_opacities_grad,
     data_t* __restrict__ g_semantics_grad)
 {
@@ -991,8 +1012,6 @@ __global__ void reduce_backward_partials(
                 g_means_grad[idx * 3 + comp] = acc;
             else if (comp < 9)
                 g_icov_grad[idx * 6 + (comp - 3)] = acc;
-            else if (comp == 9)
-                g_idets_grad[idx] = acc;
             else
                 g_opacities_grad[idx] = acc;
         } else {
@@ -1028,7 +1047,6 @@ __global__ void render_backward_warps(
     float_t const* __restrict__ sample_points,
     float_t const* __restrict__ gaussian_means,
     float_t const* __restrict__ gaussian_icovs,
-    float_t const* __restrict__ gaussian_idets,
     float_t const* __restrict__ gaussian_opacities,
     data_t const* __restrict__ gaussian_semantics,
     data_t const* __restrict__ out_semantics,
@@ -1042,7 +1060,6 @@ __global__ void render_backward_warps(
     bool const opacity_weighted,
     float_t* __restrict__ g_means_grad,
     float_t* __restrict__ g_icov_grad,
-    float_t* __restrict__ g_idets_grad,
     float_t* __restrict__ g_opacities_grad,
     data_t* __restrict__ g_semantics_grad)
 {
@@ -1058,7 +1075,8 @@ __global__ void render_backward_warps(
     for (index_t idx = thread_id / C10_WARP_SIZE; idx < num_gaussians; idx += num_warps) {
         auto const mean = math::vec3<float_t>::load(gaussian_means + 3 * idx);
         auto const cov = math::smat3<float_t>::load(gaussian_icovs + 6 * idx);
-        auto const deter = gaussian_idets[idx];
+        auto const deter = cov.det();
+        auto const deter_cofactor = cov.det_grad();
         auto const opa = gaussian_opacities[idx];
 
         auto const cell = math::vec3<index_t>::load(gaussian_cells + 3 * idx);
@@ -1083,7 +1101,7 @@ __global__ void render_backward_warps(
         float_t means_grad[3] = {0};
         float_t opa_grad = 0;
         float_t cov_grad[6] = {0};
-        float_t idets_grad = 0;
+        float_t deter_grad_total = 0;
 
         for (auto x = rect.min.x; x < rect.max.x; x++)
         for (auto y = rect.min.y; y < rect.max.y; y++)
@@ -1162,17 +1180,13 @@ __global__ void render_backward_warps(
                 }
 
                 deter_grad += prob_grad * prob / 2 / deter;
-                idets_grad += deter_grad;
+                deter_grad_total += deter_grad;
 
                 auto const power_grad_times_power = power_grad * power;
                 means_grad[0] -= power_grad_times_power * (cov.a11 * d.x + cov.a12 * d.y + cov.a13 * d.z);
                 means_grad[1] -= power_grad_times_power * (cov.a12 * d.x + cov.a22 * d.y + cov.a23 * d.z);
                 means_grad[2] -= power_grad_times_power * (cov.a13 * d.x + cov.a23 * d.y + cov.a33 * d.z);
 
-                // Note: the forward takes the determinant as the separate gaussian_idets
-                // input and never computes det(cov), so d(deter)/d(cov) = 0 and there is no
-                // determinant term here. It reaches the caller solely via idets_grad.
-                //
                 // The factor of 2 on the off-diagonals comes from the quadratic form:
                 // q = dx^2 a11 + dy^2 a22 + dz^2 a33 + 2 (dx dy a12 + dy dz a23 + dz dx a13).
                 cov_grad[0] += power_grad_times_power * (-0.5 * d.x * d.x);
@@ -1183,6 +1197,18 @@ __global__ void render_backward_warps(
                 cov_grad[5] += power_grad_times_power * (-d.x * d.z);
             }
         }
+
+        // The covariance also reaches the output through the determinant, which the
+        // forward computes from this same matrix, so that path belongs in cov_grad
+        // too. The cofactor depends only on the covariance, so it is applied once
+        // here rather than per voxel, and det_grad() carries the same factor of 2 on
+        // the off-diagonals as the quadratic form above.
+        cov_grad[0] += deter_grad_total * deter_cofactor.a11;
+        cov_grad[1] += deter_grad_total * deter_cofactor.a22;
+        cov_grad[2] += deter_grad_total * deter_cofactor.a33;
+        cov_grad[3] += deter_grad_total * deter_cofactor.a12;
+        cov_grad[4] += deter_grad_total * deter_cofactor.a23;
+        cov_grad[5] += deter_grad_total * deter_cofactor.a13;
 
         // The geometry gradients were accumulated identically in every lane; the
         // semantic gradients are partitioned, so each lane writes its own channels.
@@ -1200,7 +1226,6 @@ __global__ void render_backward_warps(
             p_cov_grad[4] = cov_grad[4];
             p_cov_grad[5] = cov_grad[5];
 
-            g_idets_grad[idx] = idets_grad;
             g_opacities_grad[idx] = opa_grad;
         }
 
@@ -1229,7 +1254,6 @@ __global__ void render_backward_global_memory(
     float_t const* __restrict__ sample_points,
     float_t const* __restrict__ gaussian_means,
     float_t const* __restrict__ gaussian_icovs,
-    float_t const* __restrict__ gaussian_idets,
     float_t const* __restrict__ gaussian_opacities,
     data_t const* __restrict__ gaussian_semantics,
     data_t const* __restrict__ out_semantics,
@@ -1243,14 +1267,14 @@ __global__ void render_backward_global_memory(
     bool const opacity_weighted,
     float_t* __restrict__ g_means_grad,
     float_t* __restrict__ g_icov_grad,
-    float_t* __restrict__ g_idets_grad,
     float_t* __restrict__ g_opacities_grad,
     data_t* __restrict__ g_semantics_grad)
 {
     CUDA_1D_KERNEL_LOOP(idx, num_gaussians) {
         auto const mean = math::vec3<float_t>::load(gaussian_means + 3 * idx);
         auto const cov = math::smat3<float_t>::load(gaussian_icovs + 6 * idx);
-        auto const deter = gaussian_idets[idx];
+        auto const deter = cov.det();
+        auto const deter_cofactor = cov.det_grad();
         auto const opa = gaussian_opacities[idx];
 
         auto const cell = math::vec3<index_t>::load(gaussian_cells + 3 * idx);
@@ -1269,7 +1293,7 @@ __global__ void render_backward_global_memory(
         float_t means_grad[3] = {0};
         float_t opa_grad = 0;
         float_t cov_grad[6] = {0};
-        float_t idets_grad = 0;
+        float_t deter_grad_total = 0;
 
         for (auto x = rect.min.x; x < rect.max.x; x++)
         for (auto y = rect.min.y; y < rect.max.y; y++)
@@ -1336,17 +1360,13 @@ __global__ void render_backward_global_memory(
                 }
 
                 deter_grad += prob_grad * prob / 2 / deter;
-                idets_grad += deter_grad;
+                deter_grad_total += deter_grad;
 
                 auto const power_grad_times_power = power_grad * power;
                 means_grad[0] -= power_grad_times_power * (cov.a11 * d.x + cov.a12 * d.y + cov.a13 * d.z);
                 means_grad[1] -= power_grad_times_power * (cov.a12 * d.x + cov.a22 * d.y + cov.a23 * d.z);
                 means_grad[2] -= power_grad_times_power * (cov.a13 * d.x + cov.a23 * d.y + cov.a33 * d.z);
 
-                // Note: the forward takes the determinant as the separate gaussian_idets
-                // input and never computes det(cov), so d(deter)/d(cov) = 0 and there is no
-                // determinant term here. It reaches the caller solely via idets_grad.
-                //
                 // The factor of 2 on the off-diagonals comes from the quadratic form:
                 // q = dx^2 a11 + dy^2 a22 + dz^2 a33 + 2 (dx dy a12 + dy dz a23 + dz dx a13).
                 cov_grad[0] += power_grad_times_power * (-0.5 * d.x * d.x);
@@ -1357,6 +1377,18 @@ __global__ void render_backward_global_memory(
                 cov_grad[5] += power_grad_times_power * (-d.x * d.z);
             }
         }
+
+        // The covariance also reaches the output through the determinant, which the
+        // forward computes from this same matrix, so that path belongs in cov_grad
+        // too. The cofactor depends only on the covariance, so it is applied once
+        // here rather than per voxel, and det_grad() carries the same factor of 2 on
+        // the off-diagonals as the quadratic form above.
+        cov_grad[0] += deter_grad_total * deter_cofactor.a11;
+        cov_grad[1] += deter_grad_total * deter_cofactor.a22;
+        cov_grad[2] += deter_grad_total * deter_cofactor.a33;
+        cov_grad[3] += deter_grad_total * deter_cofactor.a12;
+        cov_grad[4] += deter_grad_total * deter_cofactor.a23;
+        cov_grad[5] += deter_grad_total * deter_cofactor.a13;
 
         auto const p_mean_grad = g_means_grad + idx * 3;
         p_mean_grad[0] = means_grad[0];
@@ -1371,7 +1403,6 @@ __global__ void render_backward_global_memory(
         p_cov_grad[4] = cov_grad[4];
         p_cov_grad[5] = cov_grad[5];
 
-        g_idets_grad[idx] = idets_grad;
         g_opacities_grad[idx] = opa_grad;
     }
 }
@@ -1703,7 +1734,6 @@ render_forward(
     at::Tensor const& point_elements,
     at::Tensor const& gaussian_means,
     at::Tensor const& gaussian_icovs,
-    at::Tensor const& gaussian_idets,
     at::Tensor const& gaussian_opacities,
     at::Tensor const& gaussian_semantics,
     at::Tensor const& gaussian_cells,
@@ -1743,7 +1773,6 @@ render_forward(
         sample_points.template const_data_ptr<float_t>(),
         gaussian_means.template const_data_ptr<float_t>(),
         gaussian_icovs.template const_data_ptr<float_t>(),
-        gaussian_idets.template const_data_ptr<float_t>(),
         gaussian_opacities.template const_data_ptr<float_t>(),
         gaussian_semantics.template const_data_ptr<data_t>(),
         gaussian_cells.template const_data_ptr<index_t>(),
@@ -1777,7 +1806,6 @@ render_forward(
             point_elements.template const_data_ptr<index_t>(),
             gaussian_means.template const_data_ptr<float_t>(),
             gaussian_icovs.template const_data_ptr<float_t>(),
-            gaussian_idets.template const_data_ptr<float_t>(),
             gaussian_opacities.template const_data_ptr<float_t>(),
             gaussian_semantics.template const_data_ptr<data_t>(),
             gaussian_cells.template const_data_ptr<index_t>(),
@@ -1805,7 +1833,7 @@ render_forward(
 }
 
 template <typename index_t, typename float_t, typename data_t>
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 render_backward(
     at::Tensor const& pair_offsets,
     at::Tensor const& pair_gaussians,
@@ -1818,7 +1846,6 @@ render_backward(
     at::Tensor const& sample_points,
     at::Tensor const& gaussian_means,
     at::Tensor const& gaussian_icovs,
-    at::Tensor const& gaussian_idets,
     at::Tensor const& gaussian_opacities,
     at::Tensor const& gaussian_semantics,
     at::Tensor const& out_semantics,
@@ -1847,7 +1874,6 @@ render_backward(
 
     auto means_grad = at::zeros({num_gaussians, 3}, float_opts);
     auto icov_grad = at::zeros({num_gaussians, 6}, float_opts);
-    auto idets_grad = at::zeros({num_gaussians}, float_opts);
     auto opacities_grad = at::zeros({num_gaussians}, float_opts);
     auto semantics_grad = at::zeros({num_gaussians, num_channels}, data_opts);
 
@@ -1870,7 +1896,6 @@ render_backward(
                 sample_points.template const_data_ptr<float_t>(),
                 gaussian_means.template const_data_ptr<float_t>(),
                 gaussian_icovs.template const_data_ptr<float_t>(),
-                gaussian_idets.template const_data_ptr<float_t>(),
                 gaussian_opacities.template const_data_ptr<float_t>(),
                 gaussian_semantics.template const_data_ptr<data_t>(),
                 gaussian_cells.template const_data_ptr<index_t>(),
@@ -1907,7 +1932,6 @@ render_backward(
                 partial_semantics.template const_data_ptr<data_t>(),
                 means_grad.template mutable_data_ptr<float_t>(),
                 icov_grad.template mutable_data_ptr<float_t>(),
-                idets_grad.template mutable_data_ptr<float_t>(),
                 opacities_grad.template mutable_data_ptr<float_t>(),
                 semantics_grad.template mutable_data_ptr<data_t>());
             C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -1929,7 +1953,6 @@ render_backward(
             sample_points.template const_data_ptr<float_t>(),
             gaussian_means.template const_data_ptr<float_t>(),
             gaussian_icovs.template const_data_ptr<float_t>(),
-            gaussian_idets.template const_data_ptr<float_t>(),
             gaussian_opacities.template const_data_ptr<float_t>(),
             gaussian_semantics.template const_data_ptr<data_t>(),
             out_semantics.template const_data_ptr<data_t>(),
@@ -1943,7 +1966,6 @@ render_backward(
             opacity_weighted,
             means_grad.template mutable_data_ptr<float_t>(),
             icov_grad.template mutable_data_ptr<float_t>(),
-            idets_grad.template mutable_data_ptr<float_t>(),
             opacities_grad.template mutable_data_ptr<float_t>(),
             semantics_grad.template mutable_data_ptr<data_t>());
 
@@ -1962,7 +1984,6 @@ render_backward(
             sample_points.template const_data_ptr<float_t>(),
             gaussian_means.template const_data_ptr<float_t>(),
             gaussian_icovs.template const_data_ptr<float_t>(),
-            gaussian_idets.template const_data_ptr<float_t>(),
             gaussian_opacities.template const_data_ptr<float_t>(),
             gaussian_semantics.template const_data_ptr<data_t>(),
             out_semantics.template const_data_ptr<data_t>(),
@@ -1976,7 +1997,6 @@ render_backward(
             opacity_weighted,
             means_grad.template mutable_data_ptr<float_t>(),
             icov_grad.template mutable_data_ptr<float_t>(),
-            idets_grad.template mutable_data_ptr<float_t>(),
             opacities_grad.template mutable_data_ptr<float_t>(),
             semantics_grad.template mutable_data_ptr<data_t>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -1984,7 +2004,7 @@ render_backward(
         profiler.mark("bwd_render");
     }
 
-    return {means_grad, icov_grad, idets_grad, opacities_grad, semantics_grad};
+    return {means_grad, icov_grad, opacities_grad, semantics_grad};
 }
 
 template <typename index_t, typename float_t, typename data_t>
@@ -1993,7 +2013,6 @@ aggregate_forward(
     at::Tensor const& sample_points,
     at::Tensor const& gaussian_means,
     at::Tensor const& gaussian_icovs,
-    at::Tensor const& gaussian_idets,
     at::Tensor const& gaussian_opacities,
     at::Tensor const& gaussian_semantics,
     at::Tensor const& sample_points_int,
@@ -2065,7 +2084,6 @@ aggregate_forward(
         point_elements,
         gaussian_means,
         gaussian_icovs,
-        gaussian_idets,
         gaussian_opacities,
         gaussian_semantics,
         gaussian_means_int,
@@ -2095,7 +2113,7 @@ aggregate_forward(
 }
 
 template <typename index_t, typename float_t, typename data_t>
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 aggregate_backward(
     at::Tensor const& pair_offsets,
     at::Tensor const& pair_gaussians,
@@ -2110,7 +2128,6 @@ aggregate_backward(
     at::Tensor const& sample_points,
     at::Tensor const& gaussian_means,
     at::Tensor const& gaussian_icovs,
-    at::Tensor const& gaussian_idets,
     at::Tensor const& gaussian_opacities,
     at::Tensor const& gaussian_semantics,
     at::Tensor const& out_semantics,
@@ -2144,7 +2161,6 @@ aggregate_backward(
         sample_points,
         gaussian_means,
         gaussian_icovs,
-        gaussian_idets,
         gaussian_opacities,
         gaussian_semantics,
         out_semantics,
@@ -2168,7 +2184,6 @@ aggregate_forward(
     at::Tensor const& sample_points,
     at::Tensor const& gaussian_means,
     at::Tensor const& gaussian_icovs,
-    at::Tensor const& gaussian_idets,
     at::Tensor const& gaussian_opacities,
     at::Tensor const& gaussian_semantics,
     at::Tensor const& sample_points_int,
@@ -2186,7 +2201,6 @@ aggregate_forward(
     CHECK_CUDA(sample_points);
     CHECK_CUDA(gaussian_means);
     CHECK_CUDA(gaussian_icovs);
-    CHECK_CUDA(gaussian_idets);
     CHECK_CUDA(gaussian_opacities);
     CHECK_CUDA(gaussian_semantics);
     CHECK_CUDA(sample_points_int);
@@ -2198,7 +2212,6 @@ aggregate_forward(
     CHECK_CONTIGUOUS(sample_points);
     CHECK_CONTIGUOUS(gaussian_means);
     CHECK_CONTIGUOUS(gaussian_icovs);
-    CHECK_CONTIGUOUS(gaussian_idets);
     CHECK_CONTIGUOUS(gaussian_opacities);
     CHECK_CONTIGUOUS(gaussian_semantics);
     CHECK_CONTIGUOUS(sample_points_int);
@@ -2226,7 +2239,6 @@ aggregate_forward(
                     sample_points,
                     gaussian_means,
                     gaussian_icovs,
-                    gaussian_idets,
                     gaussian_opacities,
                     gaussian_semantics,
                     sample_points_int,
@@ -2244,7 +2256,7 @@ aggregate_forward(
     }));
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 agregate_backward(
     at::Tensor const& pair_offsets,
     at::Tensor const& pair_gaussians,
@@ -2259,7 +2271,6 @@ agregate_backward(
     at::Tensor const& sample_points,
     at::Tensor const& gaussian_means,
     at::Tensor const& gaussian_icovs,
-    at::Tensor const& gaussian_idets,
     at::Tensor const& gaussian_opacities,
     at::Tensor const& gaussian_semantics,
     at::Tensor const& out_semantics,
@@ -2285,7 +2296,6 @@ agregate_backward(
     CHECK_CUDA(sample_points);
     CHECK_CUDA(gaussian_means);
     CHECK_CUDA(gaussian_icovs);
-    CHECK_CUDA(gaussian_idets);
     CHECK_CUDA(gaussian_opacities);
     CHECK_CUDA(gaussian_semantics);
     CHECK_CUDA(out_semantics);
@@ -2307,7 +2317,6 @@ agregate_backward(
     CHECK_CONTIGUOUS(sample_points);
     CHECK_CONTIGUOUS(gaussian_means);
     CHECK_CONTIGUOUS(gaussian_icovs);
-    CHECK_CONTIGUOUS(gaussian_idets);
     CHECK_CONTIGUOUS(gaussian_opacities);
     CHECK_CONTIGUOUS(gaussian_semantics);
     CHECK_CONTIGUOUS(out_semantics);
@@ -2346,7 +2355,6 @@ agregate_backward(
                     sample_points,
                     gaussian_means,
                     gaussian_icovs,
-                    gaussian_idets,
                     gaussian_opacities,
                     gaussian_semantics,
                     out_semantics,

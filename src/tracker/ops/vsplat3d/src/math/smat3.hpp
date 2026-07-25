@@ -42,6 +42,28 @@ struct smat3 {
 
         return -static_cast<T>(0.5) * a - b;
     }
+
+    __host__ __device__ __forceinline__ T det() const
+    {
+        return a11 * (a22 * a33 - a23 * a23)
+             - a12 * (a12 * a33 - a23 * a13)
+             + a13 * (a12 * a23 - a22 * a13);
+    }
+
+    // d(det)/d(component), with the off-diagonals carrying a factor of two because
+    // each stored value occupies two positions of the symmetric matrix. Matches the
+    // convention of neg_half_quadratic's gradient.
+    __host__ __device__ __forceinline__ smat3<T> det_grad() const
+    {
+        return smat3<T>{
+            .a11 = a22 * a33 - a23 * a23,
+            .a22 = a11 * a33 - a13 * a13,
+            .a33 = a11 * a22 - a12 * a12,
+            .a12 = static_cast<T>(2) * (a23 * a13 - a33 * a12),
+            .a23 = static_cast<T>(2) * (a12 * a13 - a11 * a23),
+            .a13 = static_cast<T>(2) * (a12 * a23 - a22 * a13),
+        };
+    }
 };
 
 } /* namespace math */

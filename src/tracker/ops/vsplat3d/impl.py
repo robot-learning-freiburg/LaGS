@@ -192,8 +192,8 @@ def evaluate_gaussians(
     power = torch.sum(power * distance, dim=1)
     power = torch.exp(-0.5 * power)
 
-    # Note: the kernel takes the determinant as a separate gaussian_idets input; here
-    # it is derived from the inverse covariance instead.
+    # Note: matches the kernel, which likewise derives the determinant from the
+    # inverse covariance rather than taking it as a separate input.
     a11, a12, a13 = (
         gaussian_invcov[:, 0, 0],
         gaussian_invcov[:, 0, 1],

@@ -43,6 +43,21 @@ def _voxel_centers(grid_size, voxel_range, device):
     return grid.reshape(-1, 3)
 
 
+def _det_icovs(icovs):
+    """det of the symmetric inverse covariance, as the kernel computes it.
+
+    The op derives the determinant from icovs itself, so the reference must too --
+    including the float32 cancellation, which is why this is not torch.linalg.det.
+    """
+    a11, a22, a33 = icovs[..., 0, 0], icovs[..., 1, 1], icovs[..., 2, 2]
+    a12, a23, a13 = icovs[..., 0, 1], icovs[..., 1, 2], icovs[..., 0, 2]
+    return (
+        a11 * (a22 * a33 - a23 * a23)
+        - a12 * (a12 * a33 - a23 * a13)
+        + a13 * (a12 * a23 - a22 * a13)
+    )
+
+
 def _quaternion_to_matrix(q):
     q = q / q.norm(dim=-1, keepdim=True)
     w, x, y, z = q.unbind(-1)
@@ -96,7 +111,6 @@ def _make_scene(num_gaussians, grid_size, num_channels, seed=0, device="cuda"):
     # Symmetrize exactly: the kernel reads only the upper components, so a numerically
     # asymmetric matrix would make the reference and the kernel disagree spuriously.
     icovs = 0.5 * (icovs + icovs.transpose(-1, -2))
-    idets = 1.0 / torch.prod(scales * scales, dim=-1)
 
     # Kept clear of 0 so the `opacity > 0` filter in _AggregateFn cannot engage, and
     # clear of 1 so alpha stays away from the backward singularity.
@@ -109,7 +123,6 @@ def _make_scene(num_gaussians, grid_size, num_channels, seed=0, device="cuda"):
         "scales": scales,
         "rotations": rot,
         "icovs": icovs,
-        "idets": idets,
         "opacities": opacities,
         "semantics": semantics,
         "grid_size": grid_size,
@@ -117,16 +130,10 @@ def _make_scene(num_gaussians, grid_size, num_channels, seed=0, device="cuda"):
     }
 
 
-def _build_icovs_idets(scales, rot):
-    """Derive both from scales exactly as aggregator.py:72-83 does.
-
-    This is the caller's invariant: idets == det(icovs), with both reachable from the
-    same `scales` leaf. det(R S^-2 R^T) == det(S^-2) == 1 / prod(s^2).
-    """
+def _build_icovs(scales, rot):
+    """Derive the inverse covariance from scales exactly as aggregator.py does."""
     icovs = rot @ torch.diag_embed(1.0 / (scales * scales)) @ rot.transpose(-1, -2)
-    icovs = 0.5 * (icovs + icovs.transpose(-1, -2))
-    idets = 1.0 / torch.prod(scales * scales, dim=-1)
-    return icovs, idets
+    return 0.5 * (icovs + icovs.transpose(-1, -2))
 
 
 def _call_kernel(scene, opacity_weighted, anisotropic_radii=False):
@@ -138,7 +145,6 @@ def _call_kernel(scene, opacity_weighted, anisotropic_radii=False):
         scene["sample_points"][None],
         scene["means"][None],
         scene["icovs"][None],
-        scene["idets"][None],
         scene["scales"][None],
         scene["opacities"][None],
         scene["semantics"][None],
@@ -180,7 +186,8 @@ def _splat_mask(scene, anisotropic_radii=False):
             [a22 * a33 - a23 * a23, a11 * a33 - a13 * a13, a11 * a22 - a12 * a12],
             dim=-1,
         )
-        sigma = torch.sqrt(torch.clamp(adj_diag / scene["idets"][:, None], min=0))
+        det = _det_icovs(scene["icovs"])
+        sigma = torch.sqrt(torch.clamp(adj_diag / det[:, None], min=0))
         radii = sigma * DISTANCE_THRESHOLD / vs
     else:
         radii = (
@@ -221,7 +228,7 @@ def _dense_reference(scene, opacity_weighted, anisotropic_radii=False):
     )
     power = torch.exp(-0.5 * quad)
 
-    denom = (2 * math.pi) ** -1.5 * torch.sqrt(scene["idets"])
+    denom = (2 * math.pi) ** -1.5 * torch.sqrt(_det_icovs(icovs))
     prob = scene["opacities"][None] * denom[None] * power
     alpha = scene["opacities"][None] * power if opacity_weighted else power
 
@@ -302,7 +309,7 @@ def test_backward_matches_dense_reference(opacity_weighted):
     grad_occ = torch.randn(n_pts, generator=gen, device="cuda")
     grad_density = torch.randn(n_pts, generator=gen, device="cuda")
 
-    names = ["means", "icovs", "idets", "opacities", "semantics"]
+    names = ["means", "icovs", "opacities", "semantics"]
 
     def run(fn, batched):
         scn = dict(scene)
@@ -363,15 +370,12 @@ def test_backward_occupancy_alone_drives_opacity():
 @requires_cuda
 @pytest.mark.parametrize("opacity_weighted", [True, False])
 def test_backward_scales_under_caller_invariant(opacity_weighted):
-    """Total d(loss)/d(scales) when icovs and idets both come from one `scales` leaf.
+    """Total d(loss)/d(scales) with icovs derived from scales, as callers do.
 
-    The other backward tests treat icovs and idets as independent, which is the op's
-    actual contract but not how it is called: aggregator.py derives both from scales, so
-    idets == det(icovs) always holds and autograd sums the two routes.
-
-    That makes this the configuration where a determinant counted twice shows up -- once
-    via idets_grad and once via any det path folded into icovs_grad -- since both reach
-    scales as the same function. It is how the double-count was originally caught.
+    The op computes the determinant from icovs, so `scales` reaches the output through
+    the quadratic form and through det(icovs) alike, and both must arrive in icovs_grad.
+    Dropping the determinant (cofactor) half of that gradient shows up here as a large
+    error -- this is the end-to-end guard on it.
     """
     scene = _make_scene(num_gaussians=50, grid_size=(16, 16, 8), num_channels=18)
     rot = scene["rotations"]
@@ -384,17 +388,11 @@ def test_backward_scales_under_caller_invariant(opacity_weighted):
         device="cuda",
     )
 
-    # Guard the premise: the parametrization really does satisfy idets == det(icovs).
-    icovs, idets = _build_icovs_idets(scene["scales"], rot)
-    # pylint: disable-next=not-callable
-    det = torch.linalg.det(icovs)
-    torch.testing.assert_close(det, idets, rtol=1e-4, atol=1e-4)
-
     def scales_grad(fn, batched):
         scales = scene["scales"].clone().requires_grad_(True)
         scn = dict(scene)
         scn["scales"] = scales
-        scn["icovs"], scn["idets"] = _build_icovs_idets(scales, rot)
+        scn["icovs"] = _build_icovs(scales, rot)
         outs = fn(scn)
         sem = outs[0][0] if batched else outs[0]
         return torch.autograd.grad(sem, scales, grad_outputs=probe)[0]
@@ -410,8 +408,8 @@ def test_backward_scales_under_caller_invariant(opacity_weighted):
 def test_forward_matches_impl_reference(opacity_weighted):
     """Keep impl.py, the maintained pure-torch twin, in lockstep with the kernel.
 
-    Note impl.py derives the determinant from the inverse covariance rather than taking
-    it as a separate input, so this only holds while idets == det(icovs).
+    Both derive the determinant from the inverse covariance, so they agree by
+    construction rather than by an invariant on the inputs.
     """
     # pylint: disable=too-many-locals
     scene = _make_scene(num_gaussians=20, grid_size=(8, 8, 4), num_channels=8)
@@ -480,7 +478,7 @@ def test_grid_not_divisible_by_brick_edge(opacity_weighted):
     grad_occ = torch.randn(n_pts, generator=gen, device="cuda")
     grad_density = torch.randn(n_pts, generator=gen, device="cuda")
 
-    names = ["means", "icovs", "idets", "opacities", "semantics"]
+    names = ["means", "icovs", "opacities", "semantics"]
 
     def run(fn, batched):
         scn = dict(scene)
@@ -534,7 +532,7 @@ def test_large_channel_counts(num_channels, opacity_weighted):
     grad_occ = torch.randn(n_pts, generator=gen, device="cuda")
     grad_density = torch.randn(n_pts, generator=gen, device="cuda")
 
-    names = ["means", "icovs", "idets", "opacities", "semantics"]
+    names = ["means", "icovs", "opacities", "semantics"]
 
     def run(fn, batched):
         scn = dict(scene)
@@ -571,7 +569,7 @@ def test_anisotropic_radii_match_dense_reference(opacity_weighted):
     gen = torch.Generator(device="cuda").manual_seed(23)
     scales = torch.rand(40, 3, generator=gen, device="cuda") * 0.45 + 0.15
     scene["scales"] = scales
-    scene["icovs"], scene["idets"] = _build_icovs_idets(scales, scene["rotations"])
+    scene["icovs"] = _build_icovs(scales, scene["rotations"])
 
     # Guard against the test silently degenerating into the isotropic one.
     tight = _splat_mask(scene, anisotropic_radii=True)
@@ -598,7 +596,7 @@ def test_anisotropic_radii_match_dense_reference(opacity_weighted):
     grad_occ = torch.randn(n_pts, generator=gen, device="cuda")
     grad_density = torch.randn(n_pts, generator=gen, device="cuda")
 
-    names = ["means", "icovs", "idets", "opacities", "semantics"]
+    names = ["means", "icovs", "opacities", "semantics"]
 
     def run(fn, batched):
         scn = dict(scene)
@@ -645,7 +643,7 @@ def test_batched_elements_match_individual_calls():
     voxel_range = torch.tensor(scenes[0]["voxel_range"], device="cuda")
     voxel_size = torch.tensor(VOXEL_SIZE, device="cuda")
 
-    names = ["means", "icovs", "idets", "opacities", "semantics"]
+    names = ["means", "icovs", "opacities", "semantics"]
     stacked = {
         k: torch.stack([s[k] for s in scenes])
         for k in names + ["sample_points", "scales"]
@@ -657,7 +655,6 @@ def test_batched_elements_match_individual_calls():
         stacked["sample_points"],
         stacked["means"],
         stacked["icovs"],
-        stacked["idets"],
         stacked["scales"],
         stacked["opacities"],
         stacked["semantics"],
@@ -740,7 +737,7 @@ def test_forward_multiple_sample_points_per_voxel():
 # noise-dominated regime where its error scales as noise/eps rather than eps^2, so eps
 # must be far larger than gradcheck's 1e-6 default (measured: 1.5e-3 error at eps=1e-3,
 # 3.7e-5 at eps=1e-2). gradcheck applies one absolute eps to every input, but these
-# inputs span opacities ~0.5 to idets ~544, so each is checked on its own instead.
+# inputs span opacities ~0.5 to icovs ~8, so each is checked on its own instead.
 #
 # Means are the one input with an upper bound too: they are truncated to voxel bins,
 # which carries no gradient, so a step that flips a bin would jump the splat rect and
@@ -748,7 +745,6 @@ def test_forward_multiple_sample_points_per_voxel():
 GRADCHECK_EPS = {
     "means": 1e-2,  # metres; scene keeps a 0.148m margin to the nearest voxel bound
     "icovs": 1e-2,  # ~8 for the scene's scales
-    "idets": 1e0,  # ~544; the forward is very insensitive to it in absolute terms
     "opacities": 1e-2,  # in [0.2, 0.8]
     "semantics": 1e-2,  # ~N(0, 1); sem is linear in this, so differences are exact
 }
@@ -781,7 +777,6 @@ def test_gradcheck(name, opacity_weighted):
             scene["sample_points"].double()[None],
             args["means"][None],
             args["icovs"][None],
-            args["idets"][None],
             scene["scales"].double()[None],
             args["opacities"][None],
             args["semantics"][None],

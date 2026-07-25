@@ -14,14 +14,15 @@ from .utils import quaternion_to_rotation_matrix
 
 @torch.compile
 def _inverse_covariance(scales: torch.Tensor, rotations: torch.Tensor):
-    """cov_inv = R S^(-2) R^T and its determinant, from scales and quaternions."""
+    """cov_inv = R S^(-2) R^T, from scales and quaternions.
+
+    The op derives the determinant from this matrix itself, so it is not returned
+    here; passing a separately computed one would only let the two drift apart.
+    """
     m_scale_inv_sq = torch.diag_embed(1.0 / (scales * scales))  # S^(-2)
     m_rot = quaternion_to_rotation_matrix(rotations)  # R
 
-    cov_inv = torch.matmul(m_rot, torch.matmul(m_scale_inv_sq, m_rot.transpose(-1, -2)))
-    det_inv = 1.0 / torch.prod(scales**2, dim=-1)
-
-    return cov_inv, det_inv
+    return torch.matmul(m_rot, torch.matmul(m_scale_inv_sq, m_rot.transpose(-1, -2)))
 
 
 @torch.compile
@@ -99,7 +100,7 @@ class GaussianSemanticAggregator(nn.Module):
         rotations = utils.torch.amp.upcast(rotations, dtype=torch.float32)
         opacities = utils.torch.amp.upcast(opacities, dtype=torch.float32)
 
-        cov_inv, det_inv = _inverse_covariance(scales, rotations)
+        cov_inv = _inverse_covariance(scales, rotations)
 
         # Aggregate all layers in one batched call: the op treats the leading dim as
         # independent elements over a shared grid, so the layers (times the batch,
@@ -108,7 +109,6 @@ class GaussianSemanticAggregator(nn.Module):
             sample_points=coords.expand(b * n_layers, -1, -1),
             gaussian_means=centers.flatten(0, 1),
             gaussian_icovs=cov_inv.flatten(0, 1),
-            gaussian_idets=det_inv.flatten(0, 1),
             gaussian_scales=scales.flatten(0, 1),
             gaussian_opacities=opacities.flatten(0, 1),
             gaussian_semantics=scores.flatten(0, 1),
@@ -190,14 +190,13 @@ class GaussianFeatureAggregator(nn.Module):
         rotations = utils.torch.amp.upcast(rotations, dtype=torch.float32)
         opacities = utils.torch.amp.upcast(opacities, dtype=torch.float32)
 
-        cov_inv, det_inv = _inverse_covariance(scales, rotations)
+        cov_inv = _inverse_covariance(scales, rotations)
 
         # aggregate the gaussians
         features, bin_scores, density, prob_sum = self.aggregator(
             sample_points=coords,
             gaussian_means=centers,
             gaussian_icovs=cov_inv,
-            gaussian_idets=det_inv,
             gaussian_scales=scales,
             gaussian_opacities=opacities,
             gaussian_semantics=features,
