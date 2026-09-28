@@ -110,16 +110,17 @@ data/
 To keep the data elsewhere, point `paths.datasets.*` in
 [config/paths/default.yaml](config/paths/default.yaml) at it (or symlink into `data/`).
 
-**2. Get a checkpoint.** Download the final VoVNet-99 SGE model and place it under
+**2. Get a checkpoint.** Download the final VoVNet-99 SGE model
+([`sge-v99-nusc-f3p5.ckpt`](https://github.com/robot-learning-freiburg/lags/releases/download/sge/v1.0/sge-v99-nusc-f3p5.ckpt)) and place it under
 `ckpts/`:
 
 ```
 ckpts/sge-v99-nusc-f3p5.ckpt
 ```
 
-See the [Model Zoo](docs/ModelZoo.md) for the full checkpoint list and [Models](#models)
-for the `ckpts/` layout. The image backbones under `ckpts/pretrained/` are only needed
-for training.
+See the [Model Zoo](docs/ModelZoo.md) for the full checkpoint list and
+[Setup](docs/Setup.md#checkpoints) for downloading all weights. The image backbones
+under `ckpts/pretrained/` are only needed for training.
 
 > [!NOTE]
 > The `./main.py …` and `scripts/…` examples below assume the project `.venv` is
@@ -170,7 +171,8 @@ You can also score the same files offline with
 ## Models
 
 We provide trained checkpoints and the image-backbone weights used to initialize
-training. Download them and place them under `ckpts/`:
+training as assets of a GitHub release (see [Setup](docs/Setup.md#checkpoints) for
+download instructions). Place them under `ckpts/`:
 
 - trained model checkpoints (e.g. `lags_2s-v99-nusc-f3.ckpt`,
   `sge-v99-waymo-f3p5.ckpt`) → `ckpts/`
@@ -180,6 +182,9 @@ training. Download them and place them under `ckpts/`:
 The main models use the VoVNet-99 (`v99`) backbone; ResNet-50 (`r50`) variants are
 also provided, for both nuScenes and Waymo. See the [Model Zoo](docs/ModelZoo.md) for
 the full list of checkpoints and their experiment configs.
+
+The model weights are licensed separately from the code, for **non-commercial
+research use only**; see the [Model Zoo license](docs/ModelZoo.md#license).
 
 ## Training
 
@@ -270,6 +275,14 @@ authors for releasing their work.
 ## License
 
 This project is licensed under **AGPL-3.0-or-later** (see [`LICENSE`](LICENSE)).
+
+### Model weights
+
+The provided model weights are **not** covered by the code license. They are released
+under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) for
+non-commercial research use only, and models trained on Waymo are additionally
+subject to the Waymo Dataset License Agreement for Non-Commercial Use. See the
+[Model Zoo license](docs/ModelZoo.md#license) for details.
 
 ### ST-Refiner (not included)
 

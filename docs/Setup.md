@@ -114,9 +114,57 @@ Paths are configured in `config/paths/default.yaml`. The default layout:
 > directories, or individual datasets under `data/`, may be a symlink).
 
 Trained model checkpoints go in `ckpts/`, and the pre-trained image backbones that
-the training configs initialize from go in `ckpts/pretrained/`. The provided
-checkpoints and which experiment each corresponds to are listed in the
-[Model Zoo](ModelZoo.md).
+the training configs initialize from go in `ckpts/pretrained/` (see
+[Checkpoints](#checkpoints)).
+
+## Checkpoints
+
+All weights are provided as assets of GitHub releases, one per method plus one for
+the initialization weights:
+
+- **Trained models** → `ckpts/`, from [`lags/v1.0`](https://github.com/robot-learning-freiburg/lags/releases/tag/lags/v1.0) (`lags_*.ckpt`)
+  and [`sge/v1.0`](https://github.com/robot-learning-freiburg/lags/releases/tag/sge/v1.0) (`sge-*.ckpt`). Needed to evaluate or run the
+  provided models. The [Model Zoo](ModelZoo.md) lists every checkpoint, its experiment
+  config, and its metrics.
+- **Initialization weights** (pre-trained image backbones) → `ckpts/pretrained/`, from
+  [`pretrained/v1.0`](https://github.com/robot-learning-freiburg/lags/releases/tag/pretrained/v1.0). Only needed to train; the stage-1
+  configs load them via `init.checkpoint`:
+
+  | Checkpoint | Used by |
+  |---|---|
+  | [`fcos3d_vovnet_imgbackbone.ckpt`](https://github.com/robot-learning-freiburg/lags/releases/download/pretrained/v1.0/fcos3d_vovnet_imgbackbone.ckpt) | VoVNet-99 (`v99`) stage-1 configs |
+  | [`cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.ckpt`](https://github.com/robot-learning-freiburg/lags/releases/download/pretrained/v1.0/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.ckpt) | ResNet-50 (`r50`) stage-1 configs |
+
+For example, to fetch the final VoVNet-99 SGE model and both initialization weights:
+
+```sh
+mkdir -p ckpts/pretrained
+wget -P ckpts https://github.com/robot-learning-freiburg/lags/releases/download/sge/v1.0/sge-v99-nusc-f3p5.ckpt
+wget -P ckpts/pretrained \
+    https://github.com/robot-learning-freiburg/lags/releases/download/pretrained/v1.0/fcos3d_vovnet_imgbackbone.ckpt \
+    https://github.com/robot-learning-freiburg/lags/releases/download/pretrained/v1.0/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.ckpt
+```
+
+or download complete releases with the [GitHub CLI](https://cli.github.com/):
+
+```sh
+gh release download lags/v1.0       --repo robot-learning-freiburg/lags --dir ckpts
+gh release download sge/v1.0        --repo robot-learning-freiburg/lags --dir ckpts
+gh release download pretrained/v1.0 --repo robot-learning-freiburg/lags --dir ckpts/pretrained
+```
+
+<!-- TODO: update the release tags (lags/v1.0, sge/v1.0, pretrained/v1.0) in all download links if they differ. -->
+
+> [!IMPORTANT]
+> The weights are **not** covered by the code license. The trained models are
+> released under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+> for **non-commercial research use only**; models trained on Waymo (`*-waymo-*`) are
+> additionally subject to the
+> [Waymo Dataset License Agreement for Non-Commercial Use](https://waymo.com/open/terms).
+> The initialization weights are third-party weights and remain subject to their
+> original terms (both are trained on non-commercial data). See the
+> [Model Zoo license](ModelZoo.md#license) and the
+> [origins of the initialization weights](ModelZoo.md#pretrained-backbones).
 
 ## Datasets
 
