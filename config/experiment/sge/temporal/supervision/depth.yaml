@@ -1,0 +1,11 @@
+# @package model
+
+losses:
+  gaussian_depth:
+    weight: 1.0
+    render_scale: 0.25
+    alpha_threshold: 1.0e-5
+    depth_range: [1.0, 60.0]
+    use_alpha_weighting: false
+    opacity_pull_weight: 0.0
+    opacity_pull_sigma: 1.0

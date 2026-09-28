@@ -1,0 +1,4 @@
+tensorboard:
+  type: TensorBoardLogger
+
+  sub_dir: tensorboard

@@ -1,0 +1,11 @@
+# @package model
+
+decode_gaussian_streams: [fine]
+
+gaussian_temporal:
+  enabled: true
+  mode: track
+  sampling: adaptive
+
+  min_fresh:
+    fine: 2048

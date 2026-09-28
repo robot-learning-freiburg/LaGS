@@ -1,0 +1,29 @@
+# @package model
+
+defaults:
+ - /experiment/lags/model/base
+
+tracking: true
+use_ego_update: true
+use_motion_prediction: true
+use_motion_prediction_ref_update: true
+use_st_reasoner: true
+
+optimization:
+  mode: detached
+
+  gradient_clip_algorithm: norm
+  gradient_clip_val: 35.0
+
+head:
+  bbox_coder:
+    max_num: 150
+
+spatial_temporal_reason:
+  history_reasoning: true
+  future_reasoning: true
+  fut_len: 8
+
+runtime_tracker:
+  record_threshold: 0.4
+  max_age_since_update: 7

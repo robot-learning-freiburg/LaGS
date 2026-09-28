@@ -1,0 +1,26 @@
+# map:
+#   # ignored
+#   # TYPE_SIGN and TYPE_UNKNOWN are not typically used in 3D detection
+#   TYPE_SIGN: ignore
+#   TYPE_UNKNOWN: ignore
+
+#   # included
+#   # All cars, trucks, buses, trailers, etc. are mapped to 'Vehicle'
+#   TYPE_VEHICLE: vehicle
+
+#   # Pedestrians map directly
+#   TYPE_PEDESTRIAN: pedestrian
+
+#   # Bicycles and motorcycles are mapped to 'Cyclist'
+#   TYPE_CYCLIST: cyclist
+
+map:
+  1: vehicle          # TYPE_VEHICLE
+  2: pedestrian       # TYPE_PEDESTRIAN
+  3: ignore
+  4: cyclist          # TYPE_CYCLIST (moving)
+
+order:
+  - vehicle
+  - pedestrian
+  - cyclist

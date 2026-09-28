@@ -1,0 +1,13 @@
+# @package model
+
+gaussian_temporal:
+  consistency_loss:
+    enabled: true
+
+    center_weight: 1.0
+    scale_weight: 0.5
+    rotation_weight: 0.5
+    opacity_weight: 0.1
+    logits_weight: 2.0
+
+    dynamic_labels: ${data.labels.occupancy.movable}

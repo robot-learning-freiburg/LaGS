@@ -1,0 +1,267 @@
+# @package model
+#
+# Multi-stream hierarchical gaussian transformer configuration
+#
+# This config demonstrates a 3-stream architecture:
+# - Coarse stream (128 gaussians): Global coverage, samples from coarsest pyramid level
+# - Medium stream (1024 gaussians): Regional clusters, samples from medium pyramid level
+# - Fine stream (8192 gaussians): Local details, samples from finest pyramid level
+#
+# Features:
+# - Cross-stream communication (coarse → medium → fine)
+# - Position refinement (gaussians adapt locations)
+# - Hierarchical sampling from voxel pyramid
+# - Optional decoder weight sharing across streams
+
+# ========================================
+# HIERARCHICAL GAUSSIAN CONFIGURATION
+# ========================================
+
+# Gaussian class labels for semantic occupancy prediction
+gaussian_labels: ${data.labels.occupancy.semantic}
+
+# Number of gaussian queries per stream (dict enables hierarchical mode)
+num_gaussian_queries:
+  coarse: 128    # Global coverage from coarsest level
+  medium: 1024   # Regional clusters from medium level
+  fine: 8192     # Local details from finest level
+
+# Per-stream gaussian scale ranges [min, max] in meters
+gaussian_scale_range:
+  coarse: [1.0, 3.0]   # Larger gaussians for global structure
+  medium: [0.5, 2.0]   # Medium gaussians for clusters
+  fine: [0.1, 1.5]     # Smaller gaussians for fine details
+
+# Which voxel pyramid level each stream samples from
+# Level 0 = finest (16x200x200), Level 1 = medium (8x100x100), Level 2 = coarsest (4x50x50)
+gaussian_sample_source:
+  coarse: 2   # Sample from coarsest level
+  medium: 1   # Sample from medium level
+  fine: 0     # Sample from finest level
+
+# Sampling mode: "independent" or "top-down"
+# - independent: Each stream samples independently based on feature magnitude
+# - top-down: Coarse samples first, then medium/fine sample near coarse/medium locations
+gaussian_sample_mode: independent
+
+gaussian_query_sampling: multinomial
+gaussian_query_nmspool: 2
+
+# For top-down sampling only (uncomment to use):
+# gaussian_sample_order: [coarse, medium, fine]  # Order: coarsest to finest
+# gaussian_sample_radius:
+#   medium: 5.0   # Sample within 5m of coarse points
+#   fine: 2.5     # Sample within 2.5m of medium points
+
+# Optional: Share decoder weights across all streams (reduces parameters)
+share_gaussian_decoders: false  # Set to true to share weights
+
+# ========================================
+# GAUSSIAN SERIALIZATION
+# ========================================
+
+gaussian_serialization:
+  order: hilbert
+  depth: 8
+
+# ========================================
+# VOXEL TRANSFORMER CONFIGURATION
+# ========================================
+
+# Use hierarchical occupancy transformer
+voxel_transformer:
+  type: HierarchicalOccupancyTransformer
+  num_layers: 4
+
+  embed_dim: 256
+  image_dim: ${model.img_neck.out_channels}
+
+  voxel_range: ${common.voxel_range}
+  voxel_size: ${common.voxel_size}
+
+  # Stream names must match keys in num_gaussian_queries
+  stream_names: [coarse, medium, fine]
+
+  # Optional: Share position embeddings across streams
+  share_keypoint_posemb: false
+
+  # Transformer operations for each stream
+  # Note: Operations without 'stream' tag apply to ALL streams
+  operations:
+    # ========================================
+    # COARSE STREAM (128 gaussians)
+    # ========================================
+    # Small number of queries - can use full attention efficiently
+
+    - stream: coarse
+      type: SelfAttention
+      num_heads: 8
+      dropout: 0.1
+
+    - stream: coarse
+      type: CrossAttention
+      features: img
+      num_heads: 8
+      dropout: 0.1
+
+    - stream: coarse
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+    # ========================================
+    # MEDIUM STREAM (1024 gaussians)
+    # ========================================
+    # Moderate number of queries - use sliding window
+
+    - stream: medium
+      type: SlidingWindowSelfAttention
+      window_size: 1024
+      num_heads: 8
+      dropout: 0.1
+
+    - stream: medium
+      type: SpatialCrossAttention
+      features: img-sca
+      num_levels: 1
+      num_heads: 8
+      num_points: 8
+      dropout: 0.1
+
+    - stream: medium
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+    # ========================================
+    # FINE STREAM (8192 gaussians)
+    # ========================================
+    # Large number of queries - use sliding window for efficiency
+
+    - stream: fine
+      type: SlidingWindowSelfAttention
+      window_size: 1024
+      num_heads: 8
+      dropout: 0.1
+
+    - stream: fine
+      type: SpatialCrossAttention
+      features: img-sca
+      num_levels: 1
+      num_heads: 8
+      num_points: 8
+      dropout: 0.1
+
+    - stream: fine
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+    # ========================================
+    # CROSS-STREAM COMMUNICATION
+    # ========================================
+    # Serialized multi-level attention for hierarchical information exchange
+    # Concatenates all streams, re-serializes spatially, applies attention, splits back
+
+    - type: SerializedMultiLevelSelfAttention
+      num_heads: 8
+      dropout: 0.1
+
+      level_names: ${model.voxel_transformer.stream_names}
+
+      # Add learnable level embeddings to distinguish hierarchy levels
+      use_level_embeddings: true
+
+      # Use shared or per-level Q/K/V projections
+      use_per_level_projections: true
+
+      # Enable spatial re-serialization for cross-level communication
+      serialize: true
+      sfc_order: hilbert           # Space-filling curve type: 'hilbert' or 'morton'
+      sfc_depth: 8                 # Curve depth for encoding 3D coordinates
+
+      # Coordinate range for normalization (use voxel range)
+      coord_range: ${common.voxel_range}
+
+      # Attention pattern after serialization
+      attention_mask_type: sliding-window  # Options: 'sliding-window', 'block-sparse', 'full'
+      window_size: 1024                    # Window size: attend to ±512 neighbors in serialized order
+
+    - stream: coarse
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+    - stream: medium
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+    - stream: fine
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+# ========================================
+# GAUSSIAN AGGREGATION
+# ========================================
+
+# Aggregator cut-off (x times standard deviation) for each stream during aggregation
+gaussian_aggregator_scale:
+  coarse: 3.0
+  medium: 3.0
+  fine: 3.0
+
+# Fusion mode for combining multi-scale outputs
+gaussian_aggregator_fusion: concat  # Options: 'learned', 'sum', 'concat'
+
+# ========================================
+# GAUSSIAN DECODER CONFIGURATION
+# ========================================
+
+num_gaussian_decoder_layers: 2
+supervise_intermediate_gaussians: false
+gaussian_center_decode: true            # Decode gaussian centers or use query coords
+
+# ========================================
+# LOSS CONFIGURATION
+# ========================================
+
+losses:
+  # Hierarchical gaussian loss (per-stream supervision with multi-resolution targets)
+  semantic_gauss:
+    type: hierarchical-soft
+
+    # Mask to use for supervision
+    mask: none
+
+    # Voxel configuration (should match model config)
+    voxel_size: ${common.voxel_size}
+    voxel_range: ${common.voxel_range}
+
+    # Per-stream loss configuration
+    # Each stream has its own target resolution, weight, and scale multiplier
+    streams:
+      coarse:
+        target_resolution: [4, 50, 50]     # [Z, Y, X] - coarse resolution
+        weight: 0.3                        # Lower weight (fewer parameters)
+        scale_multiplier: 3.0
+
+      medium:
+        target_resolution: [8, 100, 100]   # [Z, Y, X] - medium resolution
+        weight: 0.5                        # Medium weight
+        scale_multiplier: 3.0
+
+      fine:
+        target_resolution: [16, 200, 200]  # [Z, Y, X] - full resolution
+        weight: 1.0                        # Full weight (most parameters)
+        scale_multiplier: 3.0
+
+    # Optional: Per-class weights
+    class_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.25]

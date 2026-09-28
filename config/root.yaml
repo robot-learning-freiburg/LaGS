@@ -1,0 +1,26 @@
+defaults:
+  - _self_
+
+  # Generic defaults.
+  - paths: default
+  - slurm: default
+  - torch: default
+  - init: default
+  - data: default
+  - validation: null
+  - trainer: default
+
+  # The experiment config specifies the actual model, data, and general
+  # training setup (and metadata) to be used. It must be specified via the
+  # command line.
+  - experiment: "???"
+
+  # Optional per-machine configuration. Can be specified via the command line.
+  - machine: null
+
+  # Optional local-machine settings that should not be stored in git (e.g., for
+  # API keys).
+  - optional local: default
+
+  # Optional debug configuration. Can be specified via the command line.
+  - debug: null

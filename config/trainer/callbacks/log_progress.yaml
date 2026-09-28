@@ -1,0 +1,5 @@
+log_progress:
+  type: LogProgress
+  interval: 50
+  logger: progress
+  log_level: info

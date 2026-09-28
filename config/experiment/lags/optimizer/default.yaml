@@ -1,0 +1,38 @@
+# @package _global_
+
+optimizer:
+  type: AdamW
+  lr: 2.0e-4
+  weight_decay: 0.01
+
+  param_groups:
+    - match: "@default"
+      lr: 2.0e-4
+    - match: "^img_backbone\\..*"
+      lr: 2.0e-5
+
+lr_scheduler:
+  scheduler:
+    type: ChainedScheduler
+    schedulers:
+      # base scheduler
+      - type: Stepped
+        interval: ${optimizer:steps_per_epoch}
+        scheduler:
+          type: OneCycleLR
+          total_steps: "${eval: ${trainer.max_epochs} + 1}"
+          max_lr: [2.0e-4, 2.0e-5]
+          pct_start: "${eval: 1 / ${trainer.max_epochs}}"
+          anneal_strategy: cos
+          div_factor: 1.0
+          final_div_factor: 1.0e+3
+          cycle_momentum: false
+      # linear warm-up
+      - type: LinearLR
+        total_iters: 500
+        start_factor: "${eval: 1.0 / 3.0}"
+        end_factor: 1.0
+
+  config:
+    interval: step
+    frequency: 1

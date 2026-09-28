@@ -1,0 +1,47 @@
+#!/bin/bash
+#SBATCH --job-name={job_name}
+#SBATCH --partition={partition}
+#SBATCH --nodes={nodes}
+#SBATCH --output=slurm-%j.out
+#SBATCH --open-mode=append
+#SBATCH --signal=SIGUSR1@600
+#SBATCH --requeue
+{optional_sbatch_args}
+
+# Set soft file limit to hard file limit
+ulimit -n $(ulimit -Hn)
+
+# Set python fault handler to get traces from native code/binaries
+export PYTHONFAULTHANDLER=1
+
+# Record SLURM job ID
+echo $SLURM_JOB_ID > "{run_dir}/slurm_job_id.txt"
+
+# Log environment
+echo "== SLURM JOB INFO ======================================================================================================"
+echo "job ID:                   ${{SLURM_JOB_ID}}"
+echo "time:                     $(date)"
+echo "current directory:        ${{PWD}}"
+echo "run directory:            {run_dir}"
+echo "name:                     ${{SLURM_JOB_NAME}}"
+echo "partition:                ${{SLURM_JOB_PARTITION}}"
+echo "nodes:                    ${{SLURM_NODELIST}}"
+echo "tasks per node:           ${{SLURM_TASKS_PER_NODE}}"
+echo "cpus per task:            ${{SLURM_CPUS_PER_TASK}}"
+echo "restart count:            ${{SLURM_RESTART_COUNT:-0}}"
+echo ""
+echo "== ENVIRONMENT ========================================================================================================="
+echo "CUDA_VISIBLE_DEVICES:     ${{CUDA_VISIBLE_DEVICES}}"
+echo ""
+
+# Source optional local setup script
+if [ -f "{config_root}/local/slurm-setup.sh" ]; then
+    echo "== SETUP ==============================================================================================================="
+    echo "Sourcing local SLURM setup script..."
+    source "{config_root}/local/slurm-setup.sh"
+    echo ""
+fi
+
+# Run the command
+echo "== LOG ================================================================================================================="
+srun python {main_script} {command} --run-dir "{run_dir}"

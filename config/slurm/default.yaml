@@ -1,0 +1,44 @@
+# Default SLURM configuration
+# Override these settings per-machine or via command line
+
+# Job name (defaults to run name if not specified)
+job_name: ${meta.run.name}
+
+# Partition to submit to
+partition: gpu
+
+# Number of nodes
+nodes: 1
+
+# Number of tasks per node (null means use partition default)
+ntasks_per_node: null
+
+# Generic resources (e.g., "gpu:4" or "gpu:a100:2")
+gres: null
+
+# CPUs per GPU (null means use partition default)
+cpus_per_gpu: null
+
+# CPUs per task (null means use partition default)
+cpus_per_task: null
+
+# Time limit (format: HH:MM:SS or D-HH:MM:SS)
+time: null
+
+# Account to charge
+account: null
+
+# Quality of Service
+qos: null
+
+# Node constraint/features
+constraint: null
+
+# Memory per node (e.g., "32GB")
+mem: null
+
+# Exclude specific nodes
+exclude: null
+
+# Additional sbatch arguments (raw string passed to sbatch)
+sbatch_args: null

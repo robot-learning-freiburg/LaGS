@@ -1,0 +1,202 @@
+[project]
+name = "tracker"
+description = "End-to-end multi-object occupancy tracking framework."
+authors = [{ name = "Maximilian Luz", email = "luz@cs.uni-freiburg.de" }]
+requires-python = "==3.11.*"
+version = "0.1.0"
+
+dependencies = [
+    # PyTorch, pinned to the CUDA 11.8 build served by the explicit
+    # pytorch-cu118 index configured under [tool.uv] below.
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+
+    # Build backends for the source-built CUDA extensions (mmcv, gsplat and this
+    # project itself). These are built with build isolation disabled (see
+    # [tool.uv]), so they resolve their build backends from this environment;
+    # keep them installed so uv's first sync phase has them ready. setuptools is
+    # capped below 81 because it dropped the bundled `pkg_resources` there, which
+    # mmcv 2.1.0's setup.py imports at build time.
+    "setuptools<81",
+    "wheel",
+    "ninja",
+
+    # base deps to be installed first
+    "numpy",
+    "lightning",
+    "tensorboard",  # default logger backend (config/trainer/logger/default.yaml)
+
+    # MMDetection and dependencies
+    "mmcv==2.1.0",
+    "mmdet==3.3.0",
+
+    # others
+    "apprise",
+    "click",
+    "colorlog",
+    "einops",
+    "GitPython",
+    "hydra-core",
+    "motmetrics",
+    "omegaconf",
+    "pypcd4",
+    "pyquaternion",
+    "randomname",
+    "rich",
+    "timm",
+    "tensordict",
+    "torchdata",
+    "gsplat",
+
+    # nuscenes-devkit: 1.2.0 is the first PyPI release whose tracking eval is
+    # compatible with motmetrics 1.4.0 and allows numpy>=1.22 (the older 1.1.11
+    # wheel ships pre-1.4.0 tracking code, which is why a git fork was used
+    # before). It's a pure-python wheel, so no source build is needed.
+    "nuscenes-devkit>=1.2.0",
+
+    # Note: the waymo preprocessing deps (tensorflow + waymo-open-dataset) are
+    # NOT project dependencies — they can't coexist with this torch stack. They
+    # live as isolated PEP 723 inline metadata in scripts/data/waymo/create_instances.py.
+]
+
+[project.optional-dependencies]
+# Visualization front-ends used by scripts/vis/* (not needed to import or train
+# the model). Install with `uv sync --extra vis`.
+vis = ["imageio", "rerun-sdk>=0.31", "viser"]
+# Optional logger backends. CSV + TensorBoard are the default (both core
+# dependencies); these are only needed when selected via config/trainer/logger/*.
+aim = ["aim"]
+mlflow = ["mlflow"]
+wandb = ["wandb"]
+
+[dependency-groups]
+# Dev tooling, installed by default on `uv sync` (uv installs the `dev` group
+# unless told otherwise). Mirrors the old `pip install .[dev]`.
+dev = ["black", "isort", "pre-commit", "pylint"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+
+# nuscenes-devkit 1.2.0 (the latest release) declares numpy<2.0.0, but its code
+# runs correctly on numpy>=2 in practice. Override that upper bound so the graph
+# can resolve on numpy 2, which the vis stack (rerun-sdk>=0.31) requires. Revisit
+# if a newer nuscenes-devkit relaxes the pin upstream.
+override-dependencies = ["numpy>=2"]
+
+# Rebuild the editable `tracker` package — which recompiles its CUDA extensions
+# (~10 min) — only when the extension sources or setup.py change, NOT on every
+# pyproject.toml edit. This *replaces* uv's default cache keys (which include
+# pyproject.toml), so changing dependencies no longer forces a full recompile.
+# Trade-off: the editable's recorded metadata can lag a dependency edit, which is
+# harmless here — uv resolves/installs dependencies independently of this wheel.
+cache-keys = [
+    { file = "setup.py" },
+    { file = "src/tracker/ops/**/*.cpp" },
+    { file = "src/tracker/ops/**/*.cu" },
+    { file = "src/tracker/ops/**/*.cuh" },
+    { file = "src/tracker/ops/**/*.hpp" },
+]
+
+# mmcv and gsplat compile CUDA/C++ ops that import torch at build time, as does
+# this project itself (the tracker.ops.* CUDAExtensions in setup.py). Disable
+# build isolation for them so their build backends use the torch/ninja/setuptools
+# already in the environment: uv does a two-phase sync, installing the
+# build-isolation-friendly deps (incl. the cu118 torch) first, then building
+# these packages against them. nvcc and the C/C++ compilers come from the
+# micromamba environment (see environment.yml) via PATH during the compile.
+#
+# Note: build isolation only affects *installation*. At lock time uv still needs
+# each package's metadata, which for these sdists means running their
+# torch-importing build backend in an isolated env with no torch — so their
+# metadata is declared explicitly under [[tool.uv.dependency-metadata]] below to
+# skip that build. (tracker itself has static metadata, so it needs no entry.)
+no-build-isolation-package = ["tracker", "mmcv", "gsplat"]
+
+# Always build gsplat from its sdist rather than accepting a prebuilt wheel, so
+# its CUDA extension (gsplat/csrc*.so) is compiled at install time. Without a
+# compiled extension gsplat falls back to JIT-compiling on first run (into
+# ~/.cache/torch_extensions/), a multi-minute stall on every fresh cache. The
+# compile only happens if nvcc is on PATH during the build, i.e. sync inside the
+# uv-cu118 micromamba env (see environment.yml); otherwise get_extensions() finds
+# no CUDA and silently produces an extension-less purelib wheel, reviving the JIT
+# fallback.
+no-binary-package = ["gsplat"]
+
+# Serve torch/torchvision/torchaudio from PyTorch's CUDA 11.8 wheel index rather
+# than PyPI. `explicit = true` keeps this index scoped to the packages mapped to
+# it in [tool.uv.sources] below.
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu118" }
+torchvision = { index = "pytorch-cu118" }
+
+# mmcv and gsplat are sdists whose build backends import torch to compute
+# metadata, which uv can't do at lock time (isolated build env, no torch). Their
+# metadata is declared here — copied verbatim from the Requires-Dist of the
+# working installs — so uv resolves without building them; the actual build
+# happens at sync time under no-build-isolation (see above).
+[[tool.uv.dependency-metadata]]
+name = "mmcv"
+version = "2.1.0"
+requires-python = ">=3.7"
+requires-dist = [
+    "addict",
+    "mmengine>=0.3.0",
+    "numpy",
+    "packaging",
+    "Pillow",
+    "pyyaml",
+    "yapf",
+    "regex; sys_platform == 'win32'",
+]
+
+[[tool.uv.dependency-metadata]]
+name = "gsplat"
+version = "1.5.3"
+requires-python = ">=3.7"
+requires-dist = [
+    "ninja",
+    "numpy",
+    "jaxtyping",
+    "rich>=12",
+    "torch",
+]
+
+[tool.isort]
+profile = "black"
+
+[tool.pylint.MAIN]
+max-module-line = 2000
+extension-pkg-allow-list = ["tracker.ops.voxelize.voxelize_ext"]
+# Put the repo root on sys.path so the ``scripts`` namespace package resolves
+# statically (e.g. ``import scripts.common.datasets``). At runtime the scripts add it
+# themselves; pylint does not execute that bootstrap, so it needs the hint here.
+init-hook = "import sys; sys.path.insert(0, '.')"
+
+[tool.pylint."MESSAGES CONTROL"]
+disable = [
+    "fixme",
+    "missing-module-docstring",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "too-many-arguments",
+    "too-many-positional-arguments",
+    "duplicate-code",
+]
+
+[tool.pylint.TYPECHECK]
+signature-mutators = [
+    "click.decorators.option",
+    "click.decorators.argument",
+    "click.decorators.version_option",
+    "click.decorators.help_option",
+    "click.decorators.pass_context",
+    "click.decorators.confirmation_option",
+]

@@ -1,0 +1,10 @@
+# @package model
+
+losses:
+  gaussian_fov:
+    visibility:
+      type: fov
+
+    losses:
+    - type: fov
+      weight: 0.1

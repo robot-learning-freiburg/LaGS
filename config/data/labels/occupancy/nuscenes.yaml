@@ -1,0 +1,122 @@
+# Occ3D semantic and panoptic occupancy labels
+
+# NOTE: According to NuScenes, "others" means invalid or unlabelled points in
+# the point cloud. However, Occ3D includes this in their evaluations. So we do
+# too. To remove "others" from the evaluation, map 0 to "ignore" and remove it
+# from the lists below.
+
+map:
+  0: others
+  1: barrier
+  2: bicycle
+  3: bus
+  4: car
+  5: construction_vehicle
+  6: motorcycle
+  7: pedestrian
+  8: traffic_cone
+  9: trailer
+  10: truck
+  11: driveable_surface
+  12: other_flat
+  13: sidewalk
+  14: terrain
+  15: manmade
+  16: vegetation
+  17: free
+
+ignore_index: -1
+
+all: # NOTE: this is ordered
+  - others
+  - barrier
+  - bicycle
+  - bus
+  - car
+  - construction_vehicle
+  - motorcycle
+  - pedestrian
+  - traffic_cone
+  - trailer
+  - truck
+  - driveable_surface
+  - other_flat
+  - sidewalk
+  - terrain
+  - manmade
+  - vegetation
+  - free
+
+thing:
+  - barrier
+  - bicycle
+  - bus
+  - car
+  - construction_vehicle
+  - motorcycle
+  - pedestrian
+  - traffic_cone
+  - trailer
+  - truck
+
+stuff:
+  - others
+  - driveable_surface
+  - other_flat
+  - sidewalk
+  - terrain
+  - manmade
+  - vegetation
+
+free:
+  - free
+
+semantic:
+  - others
+  - barrier
+  - bicycle
+  - bus
+  - car
+  - construction_vehicle
+  - motorcycle
+  - pedestrian
+  - traffic_cone
+  - trailer
+  - truck
+  - driveable_surface
+  - other_flat
+  - sidewalk
+  - terrain
+  - manmade
+  - vegetation
+
+instance:
+  - barrier
+  - bicycle
+  - bus
+  - car
+  - construction_vehicle
+  - motorcycle
+  - pedestrian
+  - traffic_cone
+  - trailer
+  - truck
+
+track:
+  - bicycle
+  - bus
+  - car
+  - motorcycle
+  - pedestrian
+  - trailer
+  - truck
+
+movable:
+  - bicycle
+  - bus
+  - car
+  - construction_vehicle
+  - motorcycle
+  - pedestrian
+  - trailer
+  - truck

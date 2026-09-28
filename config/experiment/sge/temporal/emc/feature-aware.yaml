@@ -1,0 +1,10 @@
+# @package model
+
+gaussian_temporal:
+  reconcile_coords: true
+
+  emc:
+    type: feature_aware
+    embed_dim: ${model.voxel_transformer.embed_dim}
+    motion_hidden_dim: 64
+    init_scale: 0.1

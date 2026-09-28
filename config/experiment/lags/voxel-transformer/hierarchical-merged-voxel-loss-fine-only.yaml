@@ -1,0 +1,244 @@
+# @package model
+#
+# Multi-stream hierarchical gaussian transformer with merged aggregation
+# and dense voxel-based losses (no per-gaussian semantic loss)
+#
+# SELECTIVE DECODING: Only decode the "fine" stream into gaussians
+# Coarse/medium streams act as "connecting elements" during transformer refinement
+# but are not decoded, reducing computation and parameters
+
+# ========================================
+# HIERARCHICAL GAUSSIAN CONFIGURATION
+# ========================================
+
+# Gaussian class labels for semantic occupancy prediction
+gaussian_labels: ${data.labels.occupancy.semantic}
+
+# Number of gaussian queries per stream (dict enables hierarchical mode)
+num_gaussian_queries:
+  coarse: 128    # Global coverage from coarsest level
+  medium: 1024   # Regional clusters from medium level
+  fine: 8192     # Local details from finest level
+
+# Per-stream gaussian scale ranges [min, max] in meters
+gaussian_scale_range:
+  fine: [0.1, 2.5]
+
+# Which voxel pyramid level each stream samples from
+# Level 0 = finest (16x200x200), Level 1 = medium (8x100x100), Level 2 = coarsest (4x50x50)
+gaussian_sample_source:
+  coarse: 2   # Sample from coarsest level
+  medium: 1   # Sample from medium level
+  fine: 0     # Sample from finest level
+
+# Sampling mode: "independent" or "top-down"
+gaussian_sample_mode: independent
+
+gaussian_query_sampling: multinomial
+gaussian_query_nmspool: 2
+
+# Optional: Share decoder weights across all streams (reduces parameters)
+share_gaussian_decoders: false
+
+# ========================================
+# SELECTIVE STREAM DECODING
+# ========================================
+
+# Only decode "fine" stream into gaussians
+# Coarse/medium streams participate in transformer but are not decoded
+# This reduces computation and parameters significantly while maintaining
+# the benefit of hierarchical cross-stream attention during refinement
+decode_gaussian_streams: [fine]
+
+# ========================================
+# GAUSSIAN SERIALIZATION
+# ========================================
+
+gaussian_serialization:
+  order: hilbert
+  depth: 8
+
+# ========================================
+# AGGREGATION MODE
+# ========================================
+
+# MERGED: Concatenate all streams after decoding, then aggregate once
+# This reduces feature aggregations from 3 (per-stream) to 1 (merged)
+# Note: Only "fine" stream will be decoded, so effectively single-stream aggregation
+gaussian_aggregation_mode: merged
+
+# Scale multiplier for merged aggregation
+gaussian_aggregator_scale: 3.0
+
+# ========================================
+# VOXEL TRANSFORMER CONFIGURATION
+# ========================================
+
+# Use hierarchical occupancy transformer
+voxel_transformer:
+  type: HierarchicalOccupancyTransformer
+  num_layers: 4
+
+  embed_dim: 256
+  image_dim: ${model.img_neck.out_channels}
+
+  voxel_range: ${common.voxel_range}
+  voxel_size: ${common.voxel_size}
+
+  # Stream names must match keys in num_gaussian_queries
+  # All streams participate in transformer
+  stream_names: [coarse, medium, fine]
+
+  # Optional: Share position embeddings across streams
+  share_keypoint_posemb: false
+
+  # Transformer operations for each stream
+  operations:
+    # ========================================
+    # COARSE STREAM (128 gaussians)
+    # ========================================
+
+    - stream: coarse
+      type: SelfAttention
+      num_heads: 8
+      dropout: 0.1
+
+    - stream: coarse
+      type: CrossAttention
+      features: img
+      num_heads: 8
+      dropout: 0.1
+
+    - stream: coarse
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+    # ========================================
+    # MEDIUM STREAM (1024 gaussians)
+    # ========================================
+
+    - stream: medium
+      type: SlidingWindowSelfAttention
+      window_size: 1024
+      num_heads: 8
+      dropout: 0.1
+
+    - stream: medium
+      type: SpatialCrossAttention
+      features: img-sca
+      num_levels: 1
+      num_heads: 8
+      num_points: 8
+      dropout: 0.1
+
+    - stream: medium
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+    # ========================================
+    # FINE STREAM (8192 gaussians)
+    # ========================================
+
+    - stream: fine
+      type: SlidingWindowSelfAttention
+      window_size: 1024
+      num_heads: 8
+      dropout: 0.1
+
+    - stream: fine
+      type: SpatialCrossAttention
+      features: img-sca
+      num_levels: 1
+      num_heads: 8
+      num_points: 8
+      dropout: 0.1
+
+    - stream: fine
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+    # ========================================
+    # CROSS-STREAM COMMUNICATION
+    # ========================================
+
+    - type: SerializedMultiLevelSelfAttention
+      num_heads: 8
+      dropout: 0.1
+
+      level_names: ${model.voxel_transformer.stream_names}
+      use_level_embeddings: true
+      use_per_level_projections: true
+
+      serialize: true
+      sfc_order: hilbert
+      sfc_depth: 8
+
+      coord_range: ${common.voxel_range}
+
+      attention_mask_type: sliding-window
+      window_size: 1024
+
+    - stream: coarse
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+      condition: "{layer} < {num_layers} - 1"
+
+    - stream: medium
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+      condition: "{layer} < {num_layers} - 1"
+
+    - stream: fine
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+# ========================================
+# GAUSSIAN DECODER CONFIGURATION
+# ========================================
+
+num_gaussian_decoder_layers: 2
+supervise_intermediate_gaussians: false
+gaussian_center_decode: true
+
+# ========================================
+# LOSS CONFIGURATION
+# ========================================
+
+losses:
+  # NOTE: No per-gaussian semantic loss - using dense voxel losses instead
+  # This reduces computation by avoiding per-gaussian semantic aggregation
+
+  # Dense voxel semantic loss on post-fusion features
+  gaussian_voxel:
+    mask: camera
+    semantic_labels: ${model.semantic_labels}
+    num_classes: ${len:${model.semantic_labels}}
+    source: fullres_occ  # Use post-fusion features (can also use "gaussian_occ")
+
+    cls_loss:
+      type: CrossEntropyLoss
+      use_sigmoid: false
+      loss_weight: 10.0
+
+  # Binary occupancy loss on gaussian aggregation scores
+  gaussian_occupancy:
+    mask: camera
+    nonfree_labels: ${data.labels.occupancy.semantic}
+    num_classes: 2  # Binary: free vs occupied
+
+    cls_loss:
+      type: CrossEntropyLoss
+      use_sigmoid: false
+      loss_weight: 5.0

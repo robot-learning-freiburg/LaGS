@@ -1,0 +1,5 @@
+# See [1]. Set to "high" or "medium" to enable tensor-cores on supported
+# hardware.
+#
+# [1]:  https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html
+float32_matmul_precision: highest

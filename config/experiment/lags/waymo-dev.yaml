@@ -1,0 +1,58 @@
+# @package _global_
+
+defaults:
+  - /experiment/lags/waymo-v99-2s-f3
+
+meta:
+  run:
+    name: waymo-dev
+    description: LaGS, dual-stream, dev-test
+    tags: [dev, task=4DPOT, model=LaGS-2s, dataset=waymo]
+
+common:
+  num_frames: 2
+
+data:
+  source:
+    train:
+      source:
+        split: training_mini
+
+    val:
+      source:
+        split: validation_mini
+
+    predict:
+      source:
+        split: validation_mini
+
+model:
+  num_queries: 10
+
+  img_neck:
+    out_channels: 128
+
+  depth_net:
+    hidden_channels: 128
+    context_channels: 128
+
+  voxel_transformer:
+    embed_dim: 128
+
+  head:
+    embed_dims: 128
+    num_semantic_queries: 10
+
+trainer:
+  strategy: auto
+  devices: 1
+  max_epochs: 3
+
+  limit_train_batches: 100
+  limit_val_batches: 50
+
+  precision: bf16-mixed
+
+  callbacks:
+    detect_unused_params:
+      type: DetectUnusedParameters

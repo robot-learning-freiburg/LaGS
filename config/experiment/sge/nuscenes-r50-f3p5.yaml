@@ -1,0 +1,23 @@
+# @package _global_
+
+defaults:
+  - /experiment/lags/nuscenes-r50-2s-f3
+  - /experiment/sge/temporal/base-adaptive
+  - /experiment/sge/temporal/emc/feature-aware
+  - /experiment/sge/temporal/pruning/hybrid
+  - /experiment/sge/temporal/sampling/base
+  - /experiment/sge/temporal/supervision/depth
+  - /experiment/sge/temporal/supervision/fov
+  - /experiment/sge/temporal/supervision/warmup
+
+meta:
+  run:
+    name: sge-r50-nusc-f3p5
+    description: SGE, 5 warmup frames, 3 training frame, tracking training
+    tags: [task=4DPOT, model=SGE, dataset=nuscenes, stage=tracking]
+
+common:
+  warmup_frames: 5
+  training_frames: 3
+
+  num_frames: ${eval:${common.warmup_frames} + ${common.training_frames}}

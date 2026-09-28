@@ -1,0 +1,63 @@
+# @package _global_
+
+defaults:
+  - /experiment/lags/env/slurm
+  - /experiment/lags/data/nuscenes-occupancy
+  - /experiment/lags/data/common
+  - /experiment/lags/data/loader
+  - /experiment/lags/model/base-r50
+  - /experiment/lags/model/head-kp
+  - /experiment/lags/voxel-transformer/hierarchical-merged-2lvl-r50
+  - /experiment/lags/optimizer/default
+
+meta:
+  run:
+    name: lags_2s-r50-nusc-f1
+    description: LaGS, dual-stream, detection pre-training
+    tags: [task=4DPOT, model=LaGS-2s, dataset=nuscenes, stage=detection]
+
+seed:
+  value: 3407
+
+torch:
+  float32_matmul_precision: high
+
+common:
+  num_frames: 1
+
+validation:
+  prefix: val/det/occ/
+  type: occupancy.SegmentationTrackingQuality
+  labels: ${data.labels.occupancy}
+  per_frame: true
+  mask: camera
+
+prediction:
+  type: occupancy.PanopticOccupancy
+  output_path: ${paths.current_run}/predictions/
+
+trainer:
+  strategy: ddp
+  accelerator: gpu
+  devices: 8
+  max_epochs: 12
+  sync_batchnorm: true
+  benchmark: true
+  precision: bf16-mixed
+
+  gradient_clip_val: 35
+  gradient_clip_algorithm: norm
+
+  callbacks:
+    learning_rate_monitor:
+      log_momentum: true
+      log_weight_decay: true
+
+    ema:
+      type: EMAWeightAveraging
+      decay: 0.999
+      update_starting_at_step: 3000
+
+init:
+  checkpoint: ckpts/pretrained/fcos3d_vovnet_imgbackbone.ckpt
+  strict: false

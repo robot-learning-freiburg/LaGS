@@ -1,0 +1,100 @@
+# Occ3D-Waymo semantic and panoptic occupancy labels
+#
+# This uses the 15 semantic classes defined by the Occ3D benchmark:
+# 0: TYPE_GENERALOBJECT (Mapped to 'others')
+# 1-14: Specific classes
+# 15: free (Added for the occupancy task)
+
+map:
+  0: others            # TYPE_GENERALOBJECT
+  1: vehicle           # TYPE_VEHICLE
+  2: pedestrian        # TYPE_PEDESTRIAN
+  3: sign              # TYPE_SIGN
+  4: cyclist           # TYPE_CYCLIST (moving)
+  5: traffic_light     # TYPE_TRAFFIC_LIGHT
+  6: pole              # TYPE_POLE
+  7: construction_cone # TYPE_CONSTRUCTION_CONE
+  8: bicycle           # TYPE_BICYCLE (static)
+  9: motorcycle        # TYPE_MOTORCYCLE (static)
+  10: building         # TYPE_BUILDING
+  11: vegetation       # TYPE_VEGETATION
+  12: tree_trunk       # TYPE_TREE_TRUNK
+  13: road             # TYPE_ROAD
+  14: walkable         # TYPE_WALKABLE
+  15: free
+
+ignore_index: -1
+
+all: # NOTE: this is ordered
+  - others
+  - vehicle
+  - pedestrian
+  - sign
+  - cyclist
+  - traffic_light
+  - pole
+  - construction_cone
+  - bicycle
+  - motorcycle
+  - building
+  - vegetation
+  - tree_trunk
+  - road
+  - walkable
+  - free
+
+thing: # Objects with distinct instances
+  - vehicle
+  - pedestrian
+  - cyclist
+
+stuff: # Amorphous regions
+  - others
+  - sign
+  - traffic_light
+  - pole
+  - construction_cone
+  - bicycle
+  - motorcycle
+  - building
+  - vegetation
+  - tree_trunk
+  - road
+  - walkable
+
+free:
+  - free
+
+semantic: # All non-free classes
+  - others
+  - vehicle
+  - pedestrian
+  - sign
+  - cyclist
+  - traffic_light
+  - pole
+  - construction_cone
+  - bicycle
+  - motorcycle
+  - building
+  - vegetation
+  - tree_trunk
+  - road
+  - walkable
+
+instance: # All 'thing' classes
+  - vehicle
+  - pedestrian
+  - cyclist
+
+track: # 'Thing' classes that are typically dynamic
+  - vehicle
+  - pedestrian
+  - cyclist
+
+movable:
+  - vehicle
+  - pedestrian
+  - cyclist
+  - bicycle
+  - motorcycle

@@ -1,0 +1,7 @@
+# @package slurm
+
+nodes: 1
+ntasks_per_node: ${trainer.devices}
+cpus_per_task: ${eval:${data.loader.train.num_workers} + 1}
+gres: gpu:${trainer.devices}
+mem: 320G

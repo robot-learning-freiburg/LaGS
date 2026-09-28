@@ -1,0 +1,10 @@
+aim:
+  type: AimLogger
+
+  train_metric_prefix: train/
+  test_metric_prefix: test/
+  val_metric_prefix: val/
+
+  # workaround for https://github.com/aimhubio/aim/issues/2550
+  # not needed right now, enable this if we run into any problems.
+  #capture_terminal_logs: false

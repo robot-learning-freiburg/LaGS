@@ -1,0 +1,61 @@
+# @package _global_
+
+defaults:
+  - /experiment/sge/nuscenes-v99-f3p5
+
+meta:
+  run:
+    name: sge-nusc-dev
+    description: SGE, dev-test
+    tags: [dev, task=4DPOT, model=SGE, dataset=nuscenes]
+
+common:
+  warmup_frames: 2
+  training_frames: 1
+
+  num_frames: ${eval:${common.warmup_frames} + ${common.training_frames}}
+
+data:
+  source:
+    train:
+      source:
+        split: v1.0-mini_train
+
+    val:
+      source:
+        split: v1.0-mini_val
+
+    predict:
+      source:
+        split: v1.0-mini_val
+
+model:
+  num_queries: 10
+
+  img_neck:
+    out_channels: 128
+
+  depth_net:
+    hidden_channels: 128
+    context_channels: 128
+
+  voxel_transformer:
+    embed_dim: 128
+
+  head:
+    embed_dims: 128
+    num_semantic_queries: 10
+
+trainer:
+  strategy: auto
+  devices: 1
+  max_epochs: 3
+
+  limit_train_batches: 100
+  limit_val_batches: 50
+
+  precision: bf16-mixed
+
+  callbacks:
+    detect_unused_params:
+      type: DetectUnusedParameters

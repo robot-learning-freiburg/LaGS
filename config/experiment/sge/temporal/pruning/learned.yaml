@@ -1,0 +1,26 @@
+# @package model
+
+gaussian_temporal:
+  confidence:
+    enabled: true
+    type: learned
+    alpha: 0.8
+    decay_rate: 0.1
+    dynamic_labels: ${data.labels.occupancy.movable}
+    embed_dim: ${model.voxel_transformer.embed_dim}
+
+    loss:
+      weight: 1.0
+
+  pruning:
+  - type: range
+    voxel_range: [-41.0, -41.0, -2.0, 41.0, 41.0, 6.4]
+
+  - type: confidence
+    threshold: 0.5
+    opacity_threshold: 0.01
+
+  - type: topk_hybrid_random
+    hybrid_mode: max
+    k:
+      fine: ${eval:${model.num_gaussian_queries.fine} - ${model.gaussian_temporal.min_fresh.fine}}

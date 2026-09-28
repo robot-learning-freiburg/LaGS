@@ -1,0 +1,7 @@
+# @package model
+
+gaussian_sample_priority:
+  type: temporal-density-aware
+  feature_normalization: max
+  beta: 5.0
+  gamma: 1.0

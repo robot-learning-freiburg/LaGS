@@ -1,0 +1,58 @@
+# @package _global_
+
+defaults:
+  - /experiment/lags/env/slurm
+  - /experiment/lags/data/nuscenes-occupancy
+  - /experiment/lags/data/common
+  - /experiment/lags/data/loader
+  - /experiment/lags/model/base-tracking-r50
+  - /experiment/lags/model/head-kp
+  - /experiment/lags/voxel-transformer/hierarchical-merged-2lvl-r50
+  - /experiment/lags/optimizer/default
+
+meta:
+  run:
+    name: lags_2s-r50-nusc-f3
+    description: LaGS, dual-stream, tracking training
+    tags: [task=4DPOT, model=LaGS-2s, dataset=nuscenes, stage=tracking]
+
+seed:
+  value: 3407
+
+torch:
+  float32_matmul_precision: high
+
+common:
+  num_frames: 3
+
+validation:
+  prefix: val/track/occ/
+  type: occupancy.SegmentationTrackingQuality
+  labels: ${data.labels.occupancy}
+  mask: camera
+
+prediction:
+  type: occupancy.PanopticOccupancy
+  output_path: ${paths.current_run}/predictions/
+
+trainer:
+  strategy: ddp
+  accelerator: gpu
+  devices: 8
+  max_epochs: 12
+  sync_batchnorm: true
+  benchmark: true
+  precision: bf16-mixed
+
+  callbacks:
+    learning_rate_monitor:
+      log_momentum: true
+      log_weight_decay: true
+
+    ema:
+      type: EMAWeightAveraging
+      decay: 0.999
+      update_starting_at_step: 3000
+
+init:
+  strict: false

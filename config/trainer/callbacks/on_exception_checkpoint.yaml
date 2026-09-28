@@ -1,0 +1,3 @@
+on_exception_checkpoint:
+  type: OnExceptionCheckpoint
+  dirpath: ${paths.current_run}

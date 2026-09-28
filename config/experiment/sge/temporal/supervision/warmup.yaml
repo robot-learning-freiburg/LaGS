@@ -1,0 +1,5 @@
+# @package model
+
+temporal_warmup:
+  enabled: true
+  warmup_frames: ${common.warmup_frames}

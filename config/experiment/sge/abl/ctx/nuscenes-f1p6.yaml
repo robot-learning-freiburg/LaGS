@@ -1,0 +1,23 @@
+# @package _global_
+
+defaults:
+  - /experiment/lags/nuscenes-v99-2s-f1
+  - /experiment/sge/temporal/base-adaptive
+  - /experiment/sge/temporal/emc/feature-aware
+  - /experiment/sge/temporal/pruning/hybrid
+  - /experiment/sge/temporal/sampling/base
+  - /experiment/sge/temporal/supervision/depth
+  - /experiment/sge/temporal/supervision/fov
+  - /experiment/sge/temporal/supervision/warmup
+
+meta:
+  run:
+    name: sge-v99-nusc-f1p6
+    description: SGE, 6 warmup frames, 1 training frame, detection pre-training
+    tags: [task=4DPOT, model=SGE, dataset=nuscenes, stage=detection]
+
+common:
+  warmup_frames: 6
+  training_frames: 1
+
+  num_frames: ${eval:${common.warmup_frames} + ${common.training_frames}}

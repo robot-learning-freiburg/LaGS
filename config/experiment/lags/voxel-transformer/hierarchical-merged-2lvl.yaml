@@ -1,0 +1,194 @@
+# @package model
+#
+# Multi-stream hierarchical gaussian transformer with merged aggregation and single-stream loss
+
+# ========================================
+# HIERARCHICAL GAUSSIAN CONFIGURATION
+# ========================================
+
+# Gaussian class labels for semantic occupancy prediction
+gaussian_labels: ${data.labels.occupancy.semantic}
+
+# Number of gaussian queries per stream (dict enables hierarchical mode)
+num_gaussian_queries:
+  coarse: 512    # Global coverage from coarsest level
+  fine: 8192     # Local details from finest level
+
+# Per-stream gaussian scale ranges [min, max] in meters
+gaussian_scale_range:
+  coarse: [1.0, 3.0]   # Larger gaussians for global structure
+  fine: [0.1, 1.5]     # Smaller gaussians for fine details
+
+# Which voxel pyramid level each stream samples from
+# Level 0 = finest (16x200x200), Level 1 = medium (8x100x100), Level 2 = coarsest (4x50x50)
+gaussian_sample_source:
+  coarse: 2   # Sample from coarsest level
+  fine: 0     # Sample from finest level
+
+# Sampling mode: "independent" or "top-down"
+gaussian_sample_mode: independent
+
+gaussian_query_sampling: multinomial
+gaussian_query_nmspool: 2
+
+# Optional: Share decoder weights across all streams (reduces parameters)
+share_gaussian_decoders: false
+
+# ========================================
+# GAUSSIAN SERIALIZATION
+# ========================================
+
+gaussian_serialization:
+  order: hilbert
+  depth: 8
+
+# ========================================
+# AGGREGATION MODE
+# ========================================
+
+# MERGED: Concatenate all streams after decoding, then aggregate once
+# This reduces feature aggregations from 3 (per-stream) to 1 (merged)
+gaussian_aggregation_mode: merged
+
+# Scale multiplier for merged aggregation
+gaussian_aggregator_scale: 3.0
+
+# ========================================
+# VOXEL TRANSFORMER CONFIGURATION
+# ========================================
+
+# Use hierarchical occupancy transformer
+voxel_transformer:
+  type: HierarchicalOccupancyTransformer
+  num_layers: 4
+
+  embed_dim: 256
+  image_dim: ${model.img_neck.out_channels}
+
+  voxel_range: ${common.voxel_range}
+  voxel_size: ${common.voxel_size}
+
+  # Stream names must match keys in num_gaussian_queries
+  stream_names: [coarse, fine]
+
+  # Optional: Share position embeddings across streams
+  share_keypoint_posemb: false
+
+  # Transformer operations for each stream
+  operations:
+    # ========================================
+    # COARSE STREAM (256 gaussians)
+    # ========================================
+
+    - stream: coarse
+      type: SelfAttention
+      num_heads: 8
+      dropout: 0.1
+
+    - stream: coarse
+      type: CrossAttention
+      features: img
+      num_heads: 8
+      dropout: 0.1
+
+    - stream: coarse
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+    # ========================================
+    # FINE STREAM (8192 gaussians)
+    # ========================================
+
+    - stream: fine
+      type: SlidingWindowSelfAttention
+      window_size: 1024
+      num_heads: 8
+      dropout: 0.1
+
+    - stream: fine
+      type: SpatialCrossAttention
+      features: img-sca
+      num_levels: 1
+      num_heads: 8
+      num_points: 8
+      dropout: 0.1
+
+    - stream: fine
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+    # ========================================
+    # CROSS-STREAM COMMUNICATION
+    # ========================================
+
+    - type: SerializedMultiLevelSelfAttention
+      num_heads: 8
+      dropout: 0.1
+
+      level_names: ${model.voxel_transformer.stream_names}
+      use_level_embeddings: true
+      use_per_level_projections: true
+
+      serialize: true
+      sfc_order: hilbert
+      sfc_depth: 8
+
+      coord_range: ${common.voxel_range}
+
+      attention_mask_type: sliding-window
+      window_size: 1024
+
+    - stream: coarse
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+    - stream: fine
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+# ========================================
+# GAUSSIAN DECODER CONFIGURATION
+# ========================================
+
+num_gaussian_decoder_layers: 2
+supervise_intermediate_gaussians: false
+gaussian_center_decode: true
+
+# ========================================
+# HEAD CONFIGURATION
+# ========================================
+
+tracking_head_streams: [coarse]
+
+# ========================================
+# LOSS CONFIGURATION
+# ========================================
+
+losses:
+  # Single-scale gaussian loss (concatenates all streams)
+  semantic_gauss:
+    type: single
+
+    # Base loss weight
+    weight: 10.0
+
+    # Mask to use for supervision
+    mask: none
+
+    # Voxel configuration (should match model config)
+    voxel_size: ${common.voxel_size}
+    voxel_range: ${common.voxel_range}
+
+    # Scale multiplier for aggregation
+    scale_multiplier: 3.0
+
+    # Optional: Per-class weights
+    class_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.25]

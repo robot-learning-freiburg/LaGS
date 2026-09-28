@@ -1,0 +1,16 @@
+# @package model
+
+gaussian_temporal:
+  confidence:
+    enabled: false
+
+  pruning:
+  - type: range
+    voxel_range: [-41.0, -41.0, -2.0, 41.0, 41.0, 6.4]
+
+  - type: opacity
+    threshold: 0.01
+
+  - type: topk_opacity_random
+    k:
+      fine: ${eval:${model.num_gaussian_queries.fine} - ${model.gaussian_temporal.min_fresh.fine}}

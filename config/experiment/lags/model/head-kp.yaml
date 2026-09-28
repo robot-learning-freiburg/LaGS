@@ -1,0 +1,70 @@
+# @package model
+
+head:
+  use_keypoint_features: true
+
+  transformer:
+    operations:
+      - type: SelfAttention
+        stream: semantic
+        num_heads: 8
+        dropout: 0.1
+      - type: CrossAttention
+        stream: semantic
+        features: img
+        num_heads: 8
+        dropout: 0.1
+      - type: MultiScaleDeformableCrossAttention3d
+        stream: semantic
+        features: voxel-semantic
+        num_levels: 1
+        num_heads: 8
+        num_points: 4
+        dropout: 0.1
+      - type: CrossAttention
+        stream: semantic
+        features: keypoint
+        num_heads: 8
+        dropout: 0.1
+      - type: CrossAttention
+        stream: semantic
+        features: instance
+        num_heads: 8
+        dropout: 0.1
+      - type: FeedForward
+        stream: semantic
+        hidden_dim: 1024
+        num_layers: 2
+        dropout: 0.1
+
+      - type: SelfAttention
+        stream: instance
+        num_heads: 8
+        dropout: 0.1
+      - type: CrossAttention
+        stream: instance
+        features: img
+        num_heads: 8
+        dropout: 0.1
+      - type: MultiScaleDeformableCrossAttention3d
+        stream: instance
+        features: voxel-instance
+        num_levels: 1
+        num_heads: 8
+        num_points: 4
+        dropout: 0.1
+      - type: CrossAttention
+        stream: instance
+        features: keypoint
+        num_heads: 8
+        dropout: 0.1
+      - type: CrossAttention
+        stream: instance
+        features: semantic
+        num_heads: 8
+        dropout: 0.1
+      - type: FeedForward
+        stream: instance
+        hidden_dim: 1024
+        num_layers: 2
+        dropout: 0.1

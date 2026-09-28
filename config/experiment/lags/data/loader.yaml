@@ -1,0 +1,15 @@
+# @package data
+
+loader:
+  train:
+    batch_size: 1
+    num_workers: 4
+    drop_last: true
+
+  val:
+    batch_size: 1
+    num_workers: 4
+
+  predict:
+    batch_size: 1
+    num_workers: 4

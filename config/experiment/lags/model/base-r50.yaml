@@ -1,0 +1,378 @@
+# @package model
+
+type: LatentGaussianOccupancyTracker
+
+tracking: false
+train_backbone: true
+use_ego_update: false
+use_motion_prediction: false
+use_motion_prediction_ref_update: false
+use_st_reasoner: false
+num_queries: 500
+
+image_base_feat_level: 2
+
+occupancy_labels: ${data.labels.occupancy.all}
+instance_labels: ${data.labels.detection.order}
+semantic_labels: ${data.labels.occupancy.all}
+
+filter_track_classes: false
+
+pc_range: ${common.pc_range}
+voxel_range: ${common.voxel_range}
+voxel_size: ${common.voxel_size}
+
+img_backbone:
+  type: ResNet
+  depth: 50
+  in_channels: 3
+  num_stages: 4
+  out_indices: [0, 1, 2, 3]
+  frozen_stages: 1
+  norm_cfg: {type: BN, requires_grad: true}
+  norm_eval: true
+  style: pytorch
+  with_cp: false
+
+img_neck:
+  type: FPN
+  in_channels: [256, 512, 1024, 2048]
+  out_channels: 256
+  out_levels: [0, 1, 2, 3]
+  upsample_mode: nearest
+
+depth_net:
+  type: DepthNet
+  in_channels: ${model.img_neck.out_channels}
+  hidden_channels: 256
+  context_channels: 256
+  depth_bins: 92
+
+lift_and_pool:
+  type: LiftAndPool
+  voxel_size: ${common.voxel_size}
+  voxel_range: ${common.voxel_range}
+  depth_range: ${common.depth_range}
+  depth_scaling: linear
+
+voxel_backbone:
+  type: ResNet3d
+  in_channels: ${model.depth_net.context_channels}
+  num_blocks: [1, 2, 4]
+  num_channels: [32, 64, 96]
+  strides: [1, 2, 2]
+  output_layers: [0, 1, 2]
+
+voxel_aggregate:
+  type: UNetAggregate3d
+  in_channels: ${model.voxel_backbone.num_channels}
+  out_channels: ${model.head.embed_dims}
+
+head:
+  embed_dims: 256
+  num_semantic_queries: 100
+  num_instance_classes: ${len:${model.instance_labels}}
+  num_semantic_classes: ${len:${model.semantic_labels}}
+  in_channels: ${model.img_neck.out_channels}
+  pc_range: ${model.pc_range}
+  position_range: ${common.detector_range}
+  voxel_range: ${model.lift_and_pool.voxel_range}
+  clamp_voxel_reference_points: true
+  force_mask_type: bfloat16
+
+  use_keypoint_features: false
+
+  transformer:
+    type: DualStreamTrackingTransformer
+    embed_dim: ${model.head.embed_dims}
+
+    num_layers: 4
+
+    operations:
+      - type: SelfAttention
+        stream: semantic
+        num_heads: 8
+        dropout: 0.1
+      - type: CrossAttention
+        stream: semantic
+        features: img
+        num_heads: 8
+        dropout: 0.1
+      - type: MultiScaleDeformableCrossAttention3d
+        stream: semantic
+        features: voxel-semantic
+        num_levels: 1
+        num_heads: 8
+        num_points: 4
+        dropout: 0.1
+      # - type: CrossAttention
+      #   stream: semantic
+      #   features: keypoint
+      #   num_heads: 8
+      #   dropout: 0.1
+      - type: CrossAttention
+        stream: semantic
+        features: instance
+        num_heads: 8
+        dropout: 0.1
+      - type: FeedForward
+        stream: semantic
+        hidden_dim: 1024
+        num_layers: 2
+        dropout: 0.1
+
+      - type: SelfAttention
+        stream: instance
+        num_heads: 8
+        dropout: 0.1
+      - type: CrossAttention
+        stream: instance
+        features: img
+        num_heads: 8
+        dropout: 0.1
+      - type: MultiScaleDeformableCrossAttention3d
+        stream: instance
+        features: voxel-instance
+        num_levels: 1
+        num_heads: 8
+        num_points: 4
+        dropout: 0.1
+      # - type: CrossAttention
+      #   stream: instance
+      #   features: keypoint
+      #   num_heads: 8
+      #   dropout: 0.1
+      - type: CrossAttention
+        stream: instance
+        features: semantic
+        num_heads: 8
+        dropout: 0.1
+      - type: FeedForward
+        stream: instance
+        hidden_dim: 1024
+        num_layers: 2
+        dropout: 0.1
+
+  bbox_coder:
+    post_center_range: ${model.head.position_range}
+    max_num: 300
+
+spatial_temporal_reason:
+  history_reasoning: false
+  future_reasoning: false
+  hist_len: 3
+  fut_len: 4
+  pc_range: ${model.pc_range}
+  embed_dims: ${model.head.embed_dims}
+  num_classes: ${len:${model.instance_labels}}
+
+  hist_temporal_transformer:
+    num_layers: 2
+    embed_dim: ${model.head.embed_dims}
+    operations:
+      - type: SelfAttention
+        num_heads: 8
+        dropout: 0.1
+      - type: CrossAttention
+        features: memory
+        num_heads: 8
+        dropout: 0.1
+      - type: FeedForward
+        hidden_dim: 1024
+        num_layers: 2
+        dropout: 0.1
+
+  fut_temporal_transformer:
+    num_layers: 2
+    embed_dim: ${model.head.embed_dims}
+    operations:
+      - type: SelfAttention
+        num_heads: 8
+        dropout: 0.1
+      - type: CrossAttention
+        features: memory
+        num_heads: 8
+        dropout: 0.1
+      - type: FeedForward
+        hidden_dim: 1024
+        num_layers: 2
+        dropout: 0.1
+
+  spatial_transformer:
+    num_layers: 2
+    embed_dim: ${model.head.embed_dims}
+    operations:
+      - type: SelfAttention
+        num_heads: 8
+        dropout: 0.1
+      - type: CrossAttention
+        features: memory
+        num_heads: 8
+        dropout: 0.1
+      - type: FeedForward
+        hidden_dim: 1024
+        num_layers: 2
+        dropout: 0.1
+
+runtime_tracker:
+  output_threshold: 0.2
+  score_threshold: 0.4
+  record_threshold: 0.0
+  max_age_since_update: 1
+
+occupancy_predictor:
+  type: PanopticMaskPredictor
+
+  target_labels: ${data.labels.occupancy}
+  semantic_labels: ${model.semantic_labels}
+  instance_labels: ${model.instance_labels}
+
+  instance_class_score_threshold: 0.2
+  semantic_class_score_threshold: 0.2
+
+  occupancy_score_threshold: 0.5
+  overlap_threshold: 0.0
+
+  exclude_free: true
+
+matcher:
+  type: TrackMatcher
+
+  assigner:
+    type: HungarianAssigner3D
+
+    costs:
+      - type: FocalCost
+        weight: 2.0
+
+      - type: Box3dL1Cost
+        weight: 0.25
+
+      - type: InstanceMaskCrossEntropyCost
+        mask: camera
+        weight: 1.0
+
+      - type: InstanceMaskDiceCost
+        mask: camera
+        weight: 1.0
+
+semantic_mask_matcher:
+  type: BasicMatcher
+
+  assigner:
+    type: HungarianAssigner3D
+
+    costs:
+      - type: FocalCost
+        weight: 2.0
+
+      - type: InstanceMaskCrossEntropyCost
+        mask: camera
+        weight: 5.0
+
+      - type: InstanceMaskDiceCost
+        mask: camera
+        weight: 5.0
+
+losses:
+  depth:
+    type: DepthLoss
+    range: ${model.lift_and_pool.depth_range}
+    scaling: ${model.lift_and_pool.depth_scaling}
+    weight: 1.0
+
+  occupancy:
+    num_classes: ${len:${model.occupancy_labels}}
+    mask: camera
+    ignore_index: ${data.labels.occupancy.ignore_index}
+
+    cls_loss:
+      type: CrossEntropyLoss
+      use_sigmoid: false
+      loss_weight: 10.0
+
+  single_frame:
+    interm_loss: true
+    code_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2]
+    bg_cls_weight: 0.0
+    sync_cls_avg_factor: false
+    occupancy_mask: camera
+    mask_pos_weight: 8.0
+
+    cls_loss:
+      type: FocalLoss
+      use_sigmoid: true
+      gamma: 2.0
+      alpha: 0.25
+      loss_weight: 2.0
+
+    bbox_loss:
+      type: L1Loss
+      loss_weight: 0.25
+
+    base_mask_loss:
+      type: CrossEntropyLoss
+      use_sigmoid: true
+      reduction: mean
+      loss_weight: 100.0
+
+    dice_mask_loss:
+      type: DiceLoss
+      use_sigmoid: true
+      activate: true
+      reduction: mean
+      naive_dice: true
+      eps: 1.0
+      loss_weight: 5.0
+
+  semantic_mask:
+    num_classes: ${len:${model.semantic_labels}}
+    interm_loss: true
+    bg_cls_weight: 0.0
+    sync_cls_avg_factor: false
+    occupancy_mask: camera
+    mask_pos_weight: 1.0
+
+    cls_loss:
+      type: FocalLoss
+      use_sigmoid: true
+      gamma: 2.0
+      alpha: 0.25
+      loss_weight: 2.0
+
+    base_mask_loss:
+      type: CrossEntropyLoss
+      use_sigmoid: true
+      reduction: mean
+      loss_weight: 5.0
+
+    dice_mask_loss:
+      type: DiceLoss
+      use_sigmoid: true
+      activate: true
+      reduction: mean
+      naive_dice: true
+      eps: 1.0
+      loss_weight: 5.0
+
+  mem_bank:
+    code_weights: ${model.losses.single_frame.code_weights}
+    bg_cls_weight: 0.0
+    sync_cls_avg_factor: false
+
+    cls_loss:
+      type: FocalLoss
+      use_sigmoid: true
+      gamma: 2.0
+      alpha: 0.25
+      loss_weight: 2.0
+
+    bbox_loss:
+      type: L1Loss
+      loss_weight: 0.25
+
+  prediction:
+    future_len: ${model.spatial_temporal_reason.fut_len}
+    trajectory_loss:
+      type: L1Loss
+      loss_weight: 0.5

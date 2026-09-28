@@ -1,0 +1,104 @@
+# @package _global_
+
+defaults:
+  - /experiment/lags/env/slurm
+  - /experiment/lags/data/waymo-occupancy
+  - /experiment/lags/data/common
+  - /experiment/lags/data/loader
+  - /experiment/lags/model/base-tracking-r50
+  - /experiment/lags/model/head-kp
+  - /experiment/lags/voxel-transformer/hierarchical-merged-2lvl-r50
+  - /experiment/lags/optimizer/default
+
+meta:
+  run:
+    name: lags_2s-r50-waymo-f3
+    description: LaGS, dual-stream, tracking training
+    tags: [task=4DPOT, model=LaGS-2s, dataset=waymo, stage=tracking]
+
+seed:
+  value: 3407
+
+torch:
+  float32_matmul_precision: high
+
+common:
+  num_frames: 3
+
+validation:
+  prefix: val/track/occ/
+  type: occupancy.SegmentationTrackingQuality
+  labels: ${data.labels.occupancy}
+  mask: camera
+  allow_invalid_instances: ignore
+
+prediction:
+  type: occupancy.PanopticOccupancy
+  output_path: ${paths.current_run}/predictions/
+
+trainer:
+  strategy: ddp
+  accelerator: gpu
+  devices: 8
+  max_epochs: 12
+  sync_batchnorm: true
+  benchmark: true
+
+  callbacks:
+    learning_rate_monitor:
+      log_momentum: true
+      log_weight_decay: true
+
+    ema:
+      type: EMAWeightAveraging
+      decay: 0.999
+      update_starting_at_step: 3000
+
+init:
+  strict: false
+
+model:
+  occupancy_predictor:
+    occupancy_score_threshold:
+      others: 0.2
+      vehicle: 0.7
+      pedestrian: 0.5
+      sign: 0.2
+      cyclist: 0.5
+      traffic_light: 0.2
+      pole: 0.3
+      construction_cone: 0.3
+      bicycle: 0.3
+      motorcycle: 0.5
+      building: 0.5
+      vegetation: 0.4
+      tree_trunk: 0.3
+      road: 0.7
+      walkable: 0.6
+
+  losses:
+    semantic_gauss:
+      class_weights:
+        - 21.996729830048952    # others
+        - 7.504469780801267     # vehicle
+        - 10.597629961083673    # pedestrian
+        - 12.18107968968811     # sign
+        - 15.143940258446506    # cyclist
+        - 13.035521328502758    # traffic_light
+        - 9.861234292376812     # pole
+        - 13.64431851057796     # construction_cone
+        - 15.121236434460473    # bicycle
+        - 21.996729830048952    # motorcycle
+        - 6.201671013759701     # building
+        - 5.7420517938838325    # vegetation
+        - 9.768712859518626     # tree_trunk
+        - 3.4607400626606317    # road
+        - 4.152268220983671     # walkable
+        - 1.000000000000000     # free
+
+    occupancy:
+      cls_loss:
+        class_weight: ${model.losses.semantic_gauss.class_weights}
+
+    semantic_mask:
+      mask_pos_weight: 2.0

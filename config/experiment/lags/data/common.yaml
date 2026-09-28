@@ -1,0 +1,13 @@
+# @package _global_
+
+common:
+  # Number of leading multi-frame warmup frames (no supervision). Default 0 (no
+  # warmup); SGE temporal configs override it. Used by the data pipeline to skip
+  # building occupancy GT for warmup frames.
+  warmup_frames: 0
+
+  voxel_size: [0.4, 0.4, 0.4]
+  voxel_range: [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
+  depth_range: [1.0, 45.0]
+  pc_range: [-51.2, -51.2, -1.0, 51.2, 51.2, 5.4]
+  detector_range: [-61.2, -61.2, -10.0, 61.2, 61.2, 10.0]

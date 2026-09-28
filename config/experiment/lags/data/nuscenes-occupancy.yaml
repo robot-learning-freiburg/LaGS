@@ -1,0 +1,209 @@
+# @package data
+#
+# Complete data pipeline for NuScenes occupancy prediction
+# Shared between f1 (single-frame detection) and f3 (multi-frame tracking)
+
+defaults:
+  - /data/labels/detection@labels.detection: nuscenes
+  - /data/labels/occupancy@labels.occupancy: nuscenes
+
+labels:
+  detection:
+    order:
+      - car
+      - truck
+      - bus
+      - trailer
+      - motorcycle
+      - bicycle
+      - pedestrian
+      - construction_vehicle
+      - traffic_cone
+      - barrier
+
+source:
+  train:
+    source:
+      type: NuScenes
+      root: "${paths.datasets.nuscenes}"
+      split: v1.0-train
+
+    transforms:
+      - type: nuscenes.LoadMultiFrameData
+        frames: ${common.num_frames}
+        transforms:
+          - type: Collection
+            transforms: &loader_transforms
+              - type: nuscenes.LoadTimestamp
+              - type: nuscenes.LoadImages
+                mode: bgr
+                channels:
+                  - CAM_FRONT
+                  - CAM_FRONT_RIGHT
+                  - CAM_FRONT_LEFT
+                  - CAM_BACK
+                  - CAM_BACK_LEFT
+                  - CAM_BACK_RIGHT
+              - type: nuscenes.LoadLidar
+                sweeps: 1
+              - type: PrepareLidarEgoToGlobalTxFused
+
+          - type: Collection
+            transforms:
+              - type: nuscenes.LoadAnnotations
+                labels: ${data.labels.detection}
+                forecasting_steps: 12
+                ref_channel: LIDAR_TOP
+                ref_frame: ego
+              - type: FilterInstancesByRange
+                range: [-51.2, -51.2, 51.2, 51.2]
+                check: center
+              - type: nuscenes.LoadSemanticOccupancy
+                root: "${paths.datasets.nuscenes_occ3d}"
+                labels: ${data.labels.occupancy}
+                valid_mask: [camera]
+              - type: occupancy.BuildInstanceLabels
+                data:
+                  source:
+                    type: NuScenes
+                    root: "${paths.datasets.nuscenes}"
+                    split: ${data.source.train.source.split}
+                  transforms:
+                    - type: nuscenes.LoadAnnotations
+                      labels: ${data.labels.detection}
+                      ignore_empty_annots: none
+                      ref_frame: ego
+                    - type: nuscenes.LoadSemanticOccupancy
+                      root: ${paths.datasets.nuscenes_occ3d}
+                      labels: ${data.labels.occupancy}
+                labels: ${data.labels.occupancy}
+                box_labels: ${data.labels.detection}
+                voxel_size: ${common.voxel_size}
+                voxel_range: ${common.voxel_range}
+                max_distance: 100
+              - type: occupancy.ComputeDistanceField
+                labels: ${data.labels.occupancy}
+                mask: camera
+                method: gradient
+              - type: occupancy.ComputeSemanticMasks
+              - type: occupancy.ComputeInstanceMasks
+              - type: occupancy.DropLabelsWithoutOccupancy
+                mask: camera
+              - type: DropSamplesWithoutGtBoxes
+
+      - type: CollectMultiFrameImages
+
+      - type: Collection
+        transforms:
+          - type: augment.RandomScaleAndCropImages
+            size: [320, 800]
+            scale: [0.47, 0.625]
+            h_offset: [1.0, 1.0]
+
+          # Apply flip only for single-frame (f1)
+          - type: Conditional
+            condition: "${common.num_frames} == 1"
+            transforms:
+              - type: augment.RandomFlipImages
+                probability: [0.0, 0.5]
+              - type: augment.RandomRotateImages
+                angle: [-5.4, 5.4]
+
+      - type: Collection
+        transforms: &normalization_transforms
+          - type: NormalizeImages
+            mean: [103.530, 116.280, 123.675]
+            std: [57.375, 57.120, 58.395]
+          - type: PadImages
+            divisor: 32
+            mode: constant
+            value: 0
+
+      - type: DepthFromLidarMultiFrame
+        range: ${common.depth_range}
+
+      - type: PrepareCameraToLidarEgoTxMultiFrameFused
+      - type: PrepareLidarEgoToCameraTxMultiFrameFused
+
+      - type: Drop
+        keys:
+          - labels.occupancy.instance_ids
+
+    on_none: resample
+
+  val:
+    source:
+      type: NuScenesSequential
+      root: "${paths.datasets.nuscenes}"
+      split: v1.0-val
+      batch_size: ${data.loader.val.batch_size}
+      batch_mode: parallel
+      device_mode: parallel
+
+    transforms:
+      - type: Collection
+        transforms: *loader_transforms
+
+      - type: Collection
+        transforms:
+        - type: nuscenes.LoadSemanticOccupancy
+          root: "${paths.datasets.nuscenes_occ3d}"
+          labels: ${data.labels.occupancy}
+          valid_mask: [camera]
+        - type: occupancy.BuildInstanceLabels
+          data:
+            source:
+              type: NuScenes
+              root: "${paths.datasets.nuscenes}"
+              split: ${data.source.val.source.split}
+            transforms:
+              - type: nuscenes.LoadAnnotations
+                labels: ${data.labels.detection}
+                ignore_empty_annots: none
+                ref_frame: ego
+              - type: nuscenes.LoadSemanticOccupancy
+                root: ${paths.datasets.nuscenes_occ3d}
+                labels: ${data.labels.occupancy}
+          labels: ${data.labels.occupancy}
+          box_labels: ${data.labels.detection}
+          voxel_size: ${common.voxel_size}
+          voxel_range: ${common.voxel_range}
+          max_distance: 100
+
+      - type: occupancy.ComputeDistanceField
+        labels: ${data.labels.occupancy}
+        mask: camera
+        method: gradient
+
+      - type: ScaleAndCropImages
+        size: [320, 800]
+        h_offset: 1.0
+
+      - type: Collection
+        transforms: *normalization_transforms
+
+      - type: PrepareCameraToLidarEgoTxFused
+      - type: PrepareLidarEgoToCameraTxFused
+
+  predict:
+    source:
+      type: NuScenesSequential
+      root: "${paths.datasets.nuscenes}"
+      split: v1.0-val
+      batch_size: ${data.loader.val.batch_size}
+      batch_mode: parallel
+      device_mode: parallel
+
+    transforms:
+      - type: Collection
+        transforms: *loader_transforms
+
+      - type: ScaleAndCropImages
+        size: [320, 800]
+        h_offset: 1.0
+
+      - type: Collection
+        transforms: *normalization_transforms
+
+      - type: PrepareCameraToLidarEgoTxFused
+      - type: PrepareLidarEgoToCameraTxFused

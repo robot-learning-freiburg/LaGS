@@ -1,0 +1,80 @@
+# @package model
+#
+# Single-stream voxel transformer configuration
+#
+# This config uses a single OccupancyTransformer with 8192 gaussian queries
+# for occupancy prediction. Suitable for baseline experiments (f1/f3).
+
+# ========================================
+# GAUSSIAN QUERY CONFIGURATION
+# ========================================
+
+# Gaussian class labels for semantic occupancy prediction
+gaussian_labels: ${data.labels.occupancy.semantic}
+
+num_gaussian_queries: 8192
+
+gaussian_query_sampling: multinomial
+gaussian_query_nmspool: 0
+
+gaussian_scale_range: [0.1, 2.5]
+
+num_gaussian_decoder_layers: 2
+
+supervise_intermediate_gaussians: false
+
+# ========================================
+# GAUSSIAN SERIALIZATION
+# ========================================
+
+gaussian_serialization:
+  order: hilbert
+  depth: 8
+
+# ========================================
+# VOXEL TRANSFORMER
+# ========================================
+
+voxel_transformer:
+  type: OccupancyTransformer
+  num_layers: 4
+
+  embed_dim: 256
+  image_dim: ${model.img_neck.out_channels}
+
+  voxel_range: ${model.voxel_range}
+  voxel_size: ${model.voxel_size}
+
+  operations:
+    - stream: default
+      type: SlidingWindowSelfAttention
+      window_size: 1024
+      num_heads: 8
+      dropout: 0.1
+    - stream: default
+      type: SpatialCrossAttention
+      features: img-sca
+      num_levels: 1
+      num_points: 8
+      num_heads: 8
+      dropout: 0.1
+    - stream: default
+      type: FeedForward
+      hidden_dim: 512
+      num_layers: 2
+      dropout: 0.1
+
+# ========================================
+# LOSS CONFIGURATION
+# ========================================
+
+losses:
+  semantic_gauss:
+    mask: none
+
+    weight: 10.0
+    class_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.25]
+
+    voxel_size: ${common.voxel_size}
+    voxel_range: ${common.voxel_range}
+    scale_multiplier: 3.0

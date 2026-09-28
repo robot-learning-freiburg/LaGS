@@ -1,0 +1,9 @@
+# @package _global_
+
+init:
+  # Pre-trained checkpoint to load (optional)
+  # Can be absolute path or relative to paths.root
+  checkpoint: null
+
+  # Strict checkpoint loading
+  strict: true

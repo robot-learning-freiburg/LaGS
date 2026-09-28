@@ -1,0 +1,13 @@
+val: &loader_defaults
+  batch_size: 1
+  num_workers: 4
+  pin_memory: true
+  shuffle: false
+  drop_last: false
+
+train:
+  <<: *loader_defaults
+  shuffle: true
+
+test: *loader_defaults
+predict: *loader_defaults

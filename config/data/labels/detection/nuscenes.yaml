@@ -1,0 +1,39 @@
+map:
+  # ignored
+  animal: ignore
+  human.pedestrian.personal_mobility: ignore
+  human.pedestrian.stroller: ignore
+  human.pedestrian.wheelchair: ignore
+  movable_object.debris: ignore
+  movable_object.pushable_pullable: ignore
+  static_object.bicycle_rack: ignore
+  vehicle.emergency.ambulance: ignore
+  vehicle.emergency.police: ignore
+
+  # included
+  human.pedestrian.adult: pedestrian
+  human.pedestrian.child: pedestrian
+  human.pedestrian.construction_worker: pedestrian
+  human.pedestrian.police_officer: pedestrian
+  movable_object.barrier: barrier
+  movable_object.trafficcone: traffic_cone
+  vehicle.bicycle: bicycle
+  vehicle.bus.bendy: bus
+  vehicle.bus.rigid: bus
+  vehicle.car: car
+  vehicle.construction: construction_vehicle
+  vehicle.motorcycle: motorcycle
+  vehicle.trailer: trailer
+  vehicle.truck: truck
+
+order:
+  - barrier
+  - car
+  - construction_vehicle
+  - traffic_cone
+  - bicycle
+  - pedestrian
+  - trailer
+  - bus
+  - truck
+  - motorcycle

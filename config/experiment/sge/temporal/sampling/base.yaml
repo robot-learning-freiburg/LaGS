@@ -1,0 +1,5 @@
+# @package model
+
+gaussian_sample_priority:
+  type: feature-magnitude
+  normalization: max

@@ -1,0 +1,9 @@
+cache: ${paths.root}/cache
+data: ${paths.root}/data
+runs: ${paths.root}/runs
+
+datasets:
+  nuscenes: ${paths.data}/nuscenes
+  nuscenes_occ3d: ${paths.data}/nuscenes-occ3d
+  waymo_trackocc: ${paths.data}/TrackOcc-waymo/kitti_format
+  waymo_trackocc_occ3d: ${paths.data}/TrackOcc-waymo/pano_voxel04

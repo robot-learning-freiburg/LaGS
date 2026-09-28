@@ -1,0 +1,27 @@
+# @package model
+
+head:
+  transformer:
+    type: UnifiedTrackingTransformer
+    embed_dim: ${model.head.embed_dims}
+
+    num_layers: 4
+
+    operations:
+      - type: SelfAttention
+        num_heads: 8
+        dropout: 0.1
+      - type: CrossAttention
+        features: img
+        num_heads: 8
+        dropout: 0.1
+      - type: MultiScaleDeformableCrossAttention3d
+        features: voxel
+        num_levels: 1
+        num_heads: 8
+        num_points: 4
+        dropout: 0.1
+      - type: FeedForward
+        hidden_dim: 1024
+        num_layers: 2
+        dropout: 0.1
