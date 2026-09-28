@@ -28,3 +28,8 @@ __pycache__/
 /preds
 
 TODO.md
+
+# ST-Refiner, adapted from PF-Track (CC BY-NC-SA 4.0); obtained separately, see
+# the "ST-Refiner" section in README.md
+/src/tracker/mod/lags/st_reasoner.py
+/src/tracker/mod/lags/st_reasoner_utils.py

@@ -269,12 +269,48 @@ authors for releasing their work.
 
 ## License
 
-This project is licensed under AGPL-3.0-or-later (see [`LICENSE`](LICENSE)).
+This project is licensed under **AGPL-3.0-or-later** (see [`LICENSE`](LICENSE)).
 
-The ST-Refiner component of PF-Track is not part of this repository, and
-`use_st_reasoner: true` will therefore not run successfully because the required module
-is missing.
+### ST-Refiner (not included)
 
-The codebase is designed to operate without this component; keep
-`use_st_reasoner: false` (or omit the flag) to maintain the AGPL-3.0-or-later
-compatible execution path.
+The ST-Refiner (`src/tracker/mod/lags/st_reasoner.py`) is adapted from
+[PF-Track](https://github.com/tri-ml/pf-track), which is licensed under
+**CC BY-NC-SA 4.0** (Attribution–NonCommercial–ShareAlike). It is therefore
+**not distributed with this repository**. To use it, copy the upstream files
+(commit `b25410d`) into this repository:
+
+| PF-Track | This repository |
+|---|---|
+| `projects/tracking_plugin/models/trackers/spatial_temporal_reason.py` | `src/tracker/mod/lags/st_reasoner.py` |
+| `projects/tracking_plugin/models/trackers/utils.py` | `src/tracker/mod/lags/st_reasoner_utils.py` |
+
+Then adapt `st_reasoner.py` to this code base:
+
+1. Replace the imports of PF-Track, mmcv, and mmdet modules with
+   ```python
+   from torch.nn import Linear
+   from .posenc.fourier import embedding3d as pos2posemb3d
+   from .st_reasoner_utils import (
+       time_position_embedding, xyz_ego_transformation, normalize, denormalize
+   )
+   from .transformer import TemporalTransformer
+   from .utils import Instances, inverse_sigmoid
+   ```
+2. Replace `build_transformer(cfg)` with `TemporalTransformer(**cfg)` (3x).
+3. Rename the keyword arguments of the transformer calls (3x): `x` → `memory`,
+   `query_embed` → `query_pos`, `pos_embed` → `key_pos`,
+   `query_key_padding_mask` → `key_padding_mask_self`, and
+   `key_padding_mask` → `key_padding_mask_cross`.
+4. For bf16-mixed precision: in `update_ego`, cast the transformed centers to the
+   dtype of the bbox tensors they are assigned to (3x), e.g.
+   `track_instances.bboxes[..., [0, 1, 4]] = physical_ref_points.clone().to(track_instances.bboxes.dtype)`.
+
+These files remain under CC BY-NC-SA 4.0 and are **non-commercial only**.
+
+The ST-Refiner is controlled by the `use_st_reasoner` flag and is **enabled in
+the provided tracking / paper configs** (`use_st_reasoner: true`), so
+**reproducing the paper's tracking results requires this non-commercial
+component**; without the files, these configs fail with an error explaining the
+steps above. The flag defaults to `false` in code, and the system runs fully
+without the ST-Refiner. To run the tracking configs without it, set
+`model.use_st_reasoner=false model.use_ego_update=false model.use_motion_prediction=false`.

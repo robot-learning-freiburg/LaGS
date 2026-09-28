@@ -62,8 +62,76 @@ from .occupancy.gaussian.temporal import visibility
 from .occupancy.gaussian.temporal.density_transform import DensityEgoMotionCompensation
 from .posenc.fourier import embedding3d
 from .runtime_tracker import RunTimeTracker
-from .st_reasoner import SpatialTemporalReasoner
 from .utils import Instances, build_label_map, inverse_sigmoid
+
+_ST_REASONER_MISSING = """\
+The ST-Refiner is enabled (`model.use_st_reasoner: true`), but its implementation
+`src/tracker/mod/lags/st_reasoner.py` is not present.
+
+The ST-Refiner is adapted from PF-Track (https://github.com/tri-ml/PF-Track), which
+is licensed under CC BY-NC-SA 4.0 (non-commercial only), and is therefore not
+distributed with this repository. To use it (e.g. for the provided tracking
+configs), copy the upstream files (commit b25410d) into this repository
+
+    projects/tracking_plugin/models/trackers/spatial_temporal_reason.py
+        -> src/tracker/mod/lags/st_reasoner.py
+    projects/tracking_plugin/models/trackers/utils.py
+        -> src/tracker/mod/lags/st_reasoner_utils.py
+
+and adapt `st_reasoner.py` to this code base:
+
+  1. Replace the imports of PF-Track, mmcv, and mmdet modules with
+
+         from torch.nn import Linear
+         from .posenc.fourier import embedding3d as pos2posemb3d
+         from .st_reasoner_utils import (
+             time_position_embedding, xyz_ego_transformation, normalize, denormalize
+         )
+         from .transformer import TemporalTransformer
+         from .utils import Instances, inverse_sigmoid
+
+  2. Replace `build_transformer(cfg)` with `TemporalTransformer(**cfg)` (3x).
+
+  3. Rename the keyword arguments of the transformer calls (3x):
+
+         x                      -> memory
+         query_embed            -> query_pos
+         pos_embed              -> key_pos
+         query_key_padding_mask -> key_padding_mask_self
+         key_padding_mask       -> key_padding_mask_cross
+
+  4. For bf16-mixed precision: in `update_ego`, cast the transformed centers to
+     the dtype of the bbox tensors they are assigned to (3x), e.g.
+
+         track_instances.bboxes[..., [0, 1, 4]] = \\
+             physical_ref_points.clone().to(track_instances.bboxes.dtype)
+
+Note that these files are subject to the terms of CC BY-NC-SA 4.0.
+
+Alternatively, disable the ST-Refiner and the features depending on it by setting
+
+    model.use_st_reasoner=false
+    model.use_ego_update=false
+    model.use_motion_prediction=false
+"""
+
+
+def _import_st_reasoner() -> type[nn.Module]:
+    """Import the (optional, separately obtained) ST-Refiner implementation."""
+    try:
+        from .st_reasoner import (  # pylint: disable=import-outside-toplevel
+            SpatialTemporalReasoner,
+        )
+    except ModuleNotFoundError as e:
+        # only handle the files themselves missing, not errors from inside them
+        missing = {f"{__package__}.st_reasoner", f"{__package__}.st_reasoner_utils"}
+        if e.name not in missing:
+            raise
+        raise ModuleNotFoundError(
+            f"No module named '{e.name}'.\n\n{_ST_REASONER_MISSING}", name=e.name
+        ) from e
+
+    return SpatialTemporalReasoner
 
 
 @registry.register
@@ -598,9 +666,8 @@ class LatentGaussianOccupancyTracker(Base):
         self.embed_dims = self.tracking_head.embed_dims
 
         if self.use_st_reasoner:
-            self.st_reasoner = SpatialTemporalReasoner(
-                **self.conf.spatial_temporal_reason
-            )
+            st_reasoner_cls = _import_st_reasoner()
+            self.st_reasoner = st_reasoner_cls(**self.conf.spatial_temporal_reason)
             self.hist_len = self.st_reasoner.hist_len
             self.fut_len = self.st_reasoner.fut_len
             self.st_history_reasoning = self.st_reasoner.history_reasoning
