@@ -2091,20 +2091,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pypcd4"
-version = "1.4.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "pydantic" },
-    { name = "python-neo-lzf" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/63/e3/6aba40c44a3cde9d7956bf860da6f66f91d08dd706620941513c76180431/pypcd4-1.4.3.tar.gz", hash = "sha256:dae09e3ef475a8b30ef8888e9feaf82f479759c421cb56c6533a006981b48c27", size = 27530, upload-time = "2026-01-07T10:08:27.097Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7b/88/4ab71c769b64e3bf692254debb8476ebbaa0f9a847cdb8efe652960b0c2c/pypcd4-1.4.3-py3-none-any.whl", hash = "sha256:4d39073ef9f4945922561ad1b5246c008dfe110af2931dea963cafb1e0717d4f", size = 14857, upload-time = "2026-01-07T10:08:25.431Z" },
-]
-
-[[package]]
 name = "pyquaternion"
 version = "0.9.9"
 source = { registry = "https://pypi.org/simple" }
@@ -2148,21 +2134,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/82/ed/0301aeeac3e5353ef3d94b6ec08bbcabd04a72018415dcb29e588514bba8/python_dotenv-1.2.2.tar.gz", hash = "sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3", size = 50135, upload-time = "2026-03-01T16:00:26.196Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0b/d7/1959b9648791274998a9c3526f6d0ec8fd2233e4d4acce81bbae76b44b2a/python_dotenv-1.2.2-py3-none-any.whl", hash = "sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a", size = 22101, upload-time = "2026-03-01T16:00:25.09Z" },
-]
-
-[[package]]
-name = "python-neo-lzf"
-version = "0.3.5"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b6/9c/b986e3addce3adc8cf714367dcf57c335d25384d308e9a992f32fd93f88e/python_neo_lzf-0.3.5.tar.gz", hash = "sha256:77395b729d224c65b7b69c2b8ba89995f9bbc21bf7a8401865763c8fcafa90a7", size = 10718, upload-time = "2025-12-25T09:57:38.133Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/15/84/8cf3605feccd40d98d278d852a9fedc183a29d347950fcf0de00877f56b5/python_neo_lzf-0.3.5-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:8a1bce9ff658cf20c78aed181971b88aa5ffa93ab52885137d53f9904d43d4e6", size = 11420, upload-time = "2025-12-25T09:56:43.219Z" },
-    { url = "https://files.pythonhosted.org/packages/3e/28/900b15eb541e3225eb0b0bbddef575336fa7500490b90094eae61e929996/python_neo_lzf-0.3.5-cp311-cp311-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:cc917542baa1cf38733f57dd4703d1f627bc9e391af44e63b8b557fa0b424457", size = 19920, upload-time = "2025-12-25T09:56:44.208Z" },
-    { url = "https://files.pythonhosted.org/packages/e2/31/609a443a0a23c26aba049df2f00ca8de22af0d4fa4ee1d0f1c64f17c6ba4/python_neo_lzf-0.3.5-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:963265a869ffe6bd72962859d13fc97f744610cbf3aa42b09b1ec4138ad08979", size = 21177, upload-time = "2025-12-25T09:56:45.192Z" },
-    { url = "https://files.pythonhosted.org/packages/e1/96/57da914c2d9379b3a31000e01595346ad1ba1c847e78bce9e80e46e36f1f/python_neo_lzf-0.3.5-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:031a2213be5abe30b3bdf6e9dcf6e1c74f612435db5fd0a137dd640f4182d702", size = 20255, upload-time = "2025-12-25T09:56:46.472Z" },
-    { url = "https://files.pythonhosted.org/packages/20/c7/b31aeba8f2861aa96beb6fde730f1abf0ca0cc052816f319983303018cdd/python_neo_lzf-0.3.5-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:b48d5847785191351b7b1c8d1ee42e853f0180c4d28c28a00248f60e16e3f20a", size = 19903, upload-time = "2025-12-25T09:56:47.455Z" },
-    { url = "https://files.pythonhosted.org/packages/90/da/417e5dbaf176d161c418a61eedd8294960963ca1fdae005acfb7c7dcc9ec/python_neo_lzf-0.3.5-cp311-cp311-win32.whl", hash = "sha256:daf6424fc359fdaff27f7ed54db6bc05a16f68bc521b4d7e45c1a90ece88e406", size = 9903, upload-time = "2025-12-25T09:56:48.873Z" },
-    { url = "https://files.pythonhosted.org/packages/3d/38/c8efcc057097b4a1461ed4dae3017e5eda71ef68437d296ad2ca5d78b010/python_neo_lzf-0.3.5-cp311-cp311-win_amd64.whl", hash = "sha256:727175b79a74079f9c48614bdaa64305cbd07a5b3b6c4bae7bac2d0c2d2fa2eb", size = 10514, upload-time = "2025-12-25T09:56:49.803Z" },
 ]
 
 [[package]]
@@ -2742,7 +2713,6 @@ dependencies = [
     { name = "numpy" },
     { name = "nuscenes-devkit" },
     { name = "omegaconf" },
-    { name = "pypcd4" },
     { name = "pyquaternion" },
     { name = "randomname" },
     { name = "rich" },
@@ -2800,7 +2770,6 @@ requires-dist = [
     { name = "numpy" },
     { name = "nuscenes-devkit", specifier = ">=1.2.0" },
     { name = "omegaconf" },
-    { name = "pypcd4" },
     { name = "pyquaternion" },
     { name = "randomname" },
     { name = "rerun-sdk", marker = "extra == 'vis'", specifier = ">=0.31" },

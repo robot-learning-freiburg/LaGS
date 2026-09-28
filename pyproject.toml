@@ -39,7 +39,6 @@ dependencies = [
     "hydra-core",
     "motmetrics",
     "omegaconf",
-    "pypcd4",
     "pyquaternion",
     "randomname",
     "rich",
