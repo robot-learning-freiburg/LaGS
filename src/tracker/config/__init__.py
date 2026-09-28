@@ -560,6 +560,46 @@ def _make_path_relative(path: Union[str, Path, None]) -> str | None:
         return str(path)
 
 
+def make_path_relative_to_data(path: Union[str, Path, None]) -> str | None:
+    """
+    Convert an absolute path to be relative to paths.data.
+
+    This is intended for paths that end up in hyperparameters: those are hashed
+    for on-disk caches (see utils.cache), so keeping them relative to the data
+    directory makes the caches independent of where the datasets are mounted.
+
+    Args:
+        path: Path to convert (can be None)
+
+    Returns:
+        String path relative to paths.data, or None if input is None
+    """
+    if path is None:
+        return None
+
+    path = Path(path)
+    data_root = Path(get().paths.data)
+
+    # Datasets are commonly symlinked into the data directory, so the path is
+    # only relative to it either before or after resolving symlinks -- never
+    # both. Try the combinations and take whichever one matches.
+    candidates = [
+        (path, data_root),
+        (path.resolve(), data_root.resolve()),
+        (path.resolve(), data_root),
+        (path, data_root.resolve()),
+    ]
+
+    for candidate, root in candidates:
+        try:
+            return str(candidate.relative_to(root))
+        except ValueError:
+            continue
+
+    # Path is outside paths.data, return it as-is
+    return str(path)
+
+
 def resolve_relative_path(path: Union[str, Path, None]) -> Path | None:
     """
     Resolve a path that may be relative to paths.root.

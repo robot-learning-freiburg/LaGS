@@ -1226,7 +1226,7 @@ class LoadSemanticOccupancy(Transform, RegistryBaseType):
 
         return {
             "type": f"nuscenes.{self.__class__.__name__}",
-            "root": str(self.root),
+            "root": config.make_path_relative_to_data(self.root),
             "labels": labels,
         }
 
