@@ -22,7 +22,7 @@
 
 <h3 align="center">Streaming Gaussian Encoding for 4D Panoptic Occupancy Tracking</h3>
 <p align="center">
-  <b>IEEE/RSJ IROS 2026</b><br>
+  <b>IEEE/RSJ IROS 2026</b> &nbsp;·&nbsp; 🏆 <b>Best Paper Finalist</b><br>
   Maximilian Luz<sup>1</sup>, Thomas Nürnberg<sup>2</sup>, Yakov Miron<sup>2,3</sup>, Abhinav Valada<sup>1</sup><br>
   <a href="https://sge.cs.uni-freiburg.de/">Project Page</a> &nbsp;|&nbsp; <a href="https://arxiv.org/abs/2606.30754">arXiv</a>
 </p>
