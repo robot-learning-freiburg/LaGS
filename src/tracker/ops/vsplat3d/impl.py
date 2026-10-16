@@ -3,19 +3,19 @@
 
 import torch
 
-# WARNING: code is not tested...
-# WARNING: code doesn't compile with torch.compile() currently...
-
-# pylint: disable=protected-access
-torch._dynamo.config.capture_dynamic_output_shape_ops = True
-torch._dynamo.config.capture_scalar_outputs = True
+# Pure-PyTorch reference for the vsplat3d cuda kernel. Not used by the model; it exists to
+# be read alongside src/cuda/aggregate.cu and is checked against it by
+# tests/ops/test_vsplat3d.py. Keep the two semantically in lockstep.
+#
+# Deliberately not torch.compile'd: this is a readability/correctness reference, so the
+# compile modes buy nothing, and mode="reduce-overhead" (cuda graphs) actively breaks
+# calling it twice to compare results.
 
 
 @torch.no_grad()
-@torch.compile(mode="reduce-overhead", fullgraph=True)
 def compute_gaussian_voxel_index_pairs(
     center_index: torch.Tensor,  # [N, 3], int
-    radius: torch.Tensor,  # [N], int
+    radius: torch.Tensor,  # [N] or [N, 3], int
     grid_size: torch.Tensor,  # [3], int
 ):
     # pylint: disable=too-many-locals
@@ -23,11 +23,16 @@ def compute_gaussian_voxel_index_pairs(
     device = center_index.device
     num_gaussians = center_index.shape[0]
 
+    # A scalar radius applies to all three axes; the kernel's anisotropic_radii mode
+    # supplies one radius per axis instead.
+    if radius.dim() == 1:
+        radius = radius[:, None].expand(-1, 3)
+
     # Compute the bounding box for each gaussian
     zeros = torch.zeros(3, dtype=torch.int64, device=device)
 
-    rect_min = center_index[:, :] - radius[:, None]
-    rect_max = center_index[:, :] + radius[:, None] + 1
+    rect_min = center_index[:, :] - radius
+    rect_max = center_index[:, :] + radius + 1
 
     rect_min = torch.clamp(rect_min, min=zeros[None, :], max=grid_size[None, :])
     rect_max = torch.clamp(rect_max, min=zeros[None, :], max=grid_size[None, :])
@@ -71,7 +76,6 @@ def compute_gaussian_voxel_index_pairs(
 
 
 @torch.no_grad()
-@torch.compile(mode="reduce-overhead", fullgraph=True)
 def filter_index_pairs(
     sample_index: torch.Tensor,  # [K, 3], int
     gaussian_index: torch.Tensor,  # [N]
@@ -122,8 +126,6 @@ def filter_index_pairs(
 
 
 @torch.no_grad()
-# @torch.compile(mode="max-autotune", fullgraph=True)
-# Note: This doesn't want to compile :(
 def compute_sample_gaussian_pairs(
     sample_point_index: torch.Tensor,  # [K, 3], int
     gaussian_center_index: torch.Tensor,  # [N, 3], int
@@ -165,7 +167,6 @@ def compute_sample_gaussian_pairs(
     return sample_index, gaussian_index
 
 
-@torch.compile(mode="reduce-overhead", fullgraph=True)
 def evaluate_gaussians(
     sample_index: torch.Tensor,  # [K], int
     gaussian_index: torch.Tensor,  # [K], int
@@ -173,6 +174,7 @@ def evaluate_gaussians(
     gaussian_means: torch.Tensor,  # [M, 3], float
     gaussian_invcov: torch.Tensor,  # [M, 3, 3], float
     gaussian_opacities: torch.Tensor,  # [M], float
+    opacity_weighted: bool = False,
 ):
     # pylint: disable=too-many-locals
 
@@ -186,13 +188,12 @@ def evaluate_gaussians(
     distance = gaussian_means - sample_points
 
     # Compute the exponent term of the gaussian
-    # torch.einsum doesn't work well with torch.compile...
     power = torch.bmm(distance.unsqueeze(1), gaussian_invcov).squeeze(1)
     power = torch.sum(power * distance, dim=1)
     power = torch.exp(-0.5 * power)
 
-    # Compute determinant manually to avoid linalg operations that cause
-    # compilation issues
+    # Note: matches the kernel, which likewise derives the determinant from the
+    # inverse covariance rather than taking it as a separate input.
     a11, a12, a13 = (
         gaussian_invcov[:, 0, 0],
         gaussian_invcov[:, 0, 1],
@@ -221,17 +222,22 @@ def evaluate_gaussians(
 
     prob = denom * power * gaussian_opacities
 
-    return prob, power  # [K], [K]
+    # Opacity-weighted geometry: alpha = a * exp(-1/2 (x-m)^T S^-1 (x-m)). Without the
+    # weighting, occupancy cannot see opacity at all.
+    alpha = gaussian_opacities * power if opacity_weighted else power
+
+    return prob, alpha  # [K], [K]
 
 
-@torch.compile(mode="reduce-overhead", fullgraph=True)
 def reduce(
     num_points: int,
     sample_index: torch.Tensor,  # [K], int
     gaussian_semantics: torch.Tensor,  # [K, C] float
     gaussian_prob: torch.Tensor,  # [K], float
-    gaussian_power: torch.Tensor,  # [K], float
-    epsilon: float = 1e-9,
+    gaussian_alpha: torch.Tensor,  # [K], float
+    default_value: float = 0.0,
+    # Note: matches epsilon<float> in the cuda kernel, so `valid` agrees with it.
+    epsilon: float = 1e-8,
 ):
     device = sample_index.device
 
@@ -240,13 +246,13 @@ def reduce(
     mass.index_add_(0, sample_index, gaussian_prob)
 
     # Density
-    density = torch.zeros(num_points, device=device, dtype=gaussian_power.dtype)
-    density.index_add_(0, sample_index, gaussian_power)
+    density = torch.zeros(num_points, device=device, dtype=gaussian_alpha.dtype)
+    density.index_add_(0, sample_index, gaussian_alpha)
 
     # Binary occupancy
-    occupancy = torch.ones(num_points, device=device, dtype=gaussian_power.dtype)
+    occupancy = torch.ones(num_points, device=device, dtype=gaussian_alpha.dtype)
     occupancy.index_reduce_(
-        0, sample_index, 1.0 - gaussian_power, reduce="prod", include_self=False
+        0, sample_index, 1.0 - gaussian_alpha, reduce="prod", include_self=False
     )
     occupancy = 1.0 - occupancy
 
@@ -256,19 +262,18 @@ def reduce(
     sem_shape = (num_points, gaussian_semantics.shape[1])
     sem = torch.zeros(sem_shape, device=device, dtype=gaussian_semantics.dtype)
     sem.index_add_(0, sample_index, gaussian_semantics)
-    sem = sem / mass[:, None]
 
-    # Handle cases where probability mass is too low
+    # Handle cases where probability mass is too low. The clamp keeps the division finite
+    # so the discarded branch cannot leak NaN into the backward pass via torch.where.
     valid = mass > epsilon
 
-    sem = torch.where(valid[:, None], sem, 1.0 / (sem.shape[1] - 1))
-    sem[~valid, :-1] = 0.0
+    sem = sem / mass.clamp(min=epsilon)[:, None]
+    sem = torch.where(valid[:, None], sem, default_value)
 
     return sem, occupancy, density, mass
 
 
-# @torch.compile(mode="reduce-overhead", fullgraph=True)
-# Note: This doesn't want to compile because compute_sample_gaussian_pairs()
+# # Note: This doesn't want to compile because compute_sample_gaussian_pairs()
 # doesn't compile
 def render(
     sample_points: torch.Tensor,  # [N, 3], float
@@ -278,8 +283,10 @@ def render(
     gaussian_invcov: torch.Tensor,  # [M, 3, 3], float
     gaussian_opacities: torch.Tensor,  # [M], float
     gaussian_semantics: torch.Tensor,  # [M, C], float
-    gaussian_radii: torch.Tensor,  # [M], int
+    gaussian_radii: torch.Tensor,  # [M] or [M, 3], int
     grid_size: torch.Tensor,  # [3], int
+    default_value: float = 0.0,
+    opacity_weighted: bool = False,
 ):
     # pylint: disable=too-many-locals
 
@@ -292,13 +299,14 @@ def render(
     )
 
     # Evaluate the gaussians at the sample points
-    prob, power = evaluate_gaussians(
+    prob, alpha = evaluate_gaussians(
         sample_index,
         gaussian_index,
         sample_points,
         gaussian_means,
         gaussian_invcov,
         gaussian_opacities,
+        opacity_weighted,
     )
 
     gaussian_semantics = gaussian_semantics[gaussian_index]
@@ -309,7 +317,8 @@ def render(
         sample_index,
         gaussian_semantics,
         prob,
-        power,
+        alpha,
+        default_value,
     )
 
     return sem, occ, density, mass

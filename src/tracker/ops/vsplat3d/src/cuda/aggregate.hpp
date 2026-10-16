@@ -14,31 +14,42 @@ namespace vsplat3d
             torch::Tensor,
             torch::Tensor,
             torch::Tensor,
+            torch::Tensor,
+            torch::Tensor,
             torch::Tensor>
         aggregate_forward(
             const torch::Tensor &sample_points,
             const torch::Tensor &gaussian_means,
             const torch::Tensor &gaussian_icovs,
-            const torch::Tensor &gaussian_idets,
             const torch::Tensor &gaussian_opacities,
             const torch::Tensor &gaussian_semantics,
             const torch::Tensor &sample_points_int,
+            const torch::Tensor &point_elements,
             const torch::Tensor &gaussian_means_int,
             const torch::Tensor &gaussian_radii,
+            const torch::Tensor &gaussian_elements,
+            const int64_t num_elements,
             const int64_t h,
             const int64_t w,
             const int64_t d,
-            const double default_value);
+            const double default_value,
+            const bool opacity_weighted);
 
-        std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+        std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
         agregate_backward(
-            const torch::Tensor &voxel_offsets,
-            const torch::Tensor &voxel_indices,
+            const torch::Tensor &pair_offsets,
+            const torch::Tensor &pair_gaussians,
+            const torch::Tensor &pair_bricks,
+            const torch::Tensor &pair_order,
+            const torch::Tensor &gaussian_means_int,
+            const torch::Tensor &gaussian_radii,
+            const torch::Tensor &gaussian_elements,
             const torch::Tensor &sample_points_int,
+            const torch::Tensor &point_elements,
+            const int64_t num_elements,
             const torch::Tensor &sample_points,
             const torch::Tensor &gaussian_means,
             const torch::Tensor &gaussian_icovs,
-            const torch::Tensor &gaussian_idets,
             const torch::Tensor &gaussian_opacities,
             const torch::Tensor &gaussian_semantics,
             const torch::Tensor &out_semantics,
@@ -49,6 +60,7 @@ namespace vsplat3d
             const torch::Tensor &out_density_grad,
             const int64_t h,
             const int64_t w,
-            const int64_t d);
+            const int64_t d,
+            const bool opacity_weighted);
     } /* namesace cuda */
 } /* namespace vsplat3d */

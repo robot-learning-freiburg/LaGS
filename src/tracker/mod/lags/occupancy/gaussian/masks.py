@@ -19,6 +19,8 @@ class SemanticGaussianPredictor(OccupancyPredictor):
         voxel_size: Sequence[float] = (0.4, 0.4, 0.4),
         voxel_range: Sequence[float] = (-40.0, -40.0, -1.0, 40.0, 40.0, 10.0),
         scale_multiplier: float = 5.0,
+        opacity_weighted: bool = False,
+        anisotropic_radii: bool = False,
     ):
         """
         Basic semantic mask predictor for occupancy prediction. This module uses
@@ -30,6 +32,8 @@ class SemanticGaussianPredictor(OccupancyPredictor):
             voxel_size=voxel_size,
             voxel_range=voxel_range,
             scale_multiplier=scale_multiplier,
+            opacity_weighted=opacity_weighted,
+            anisotropic_radii=anisotropic_radii,
         )
 
     @torch.no_grad()
@@ -79,6 +83,8 @@ class PanopticGaussianPredictor(OccupancyPredictor):
         voxel_size: Sequence[float] = (0.4, 0.4, 0.4),
         voxel_range: Sequence[float] = (-40.0, -40.0, -1.0, 40.0, 40.0, 10.0),
         scale_multiplier: float = 5.0,
+        opacity_weighted: bool = False,
+        anisotropic_radii: bool = False,
     ):
         super().__init__()
 
@@ -109,6 +115,8 @@ class PanopticGaussianPredictor(OccupancyPredictor):
             voxel_size=voxel_size,
             voxel_range=voxel_range,
             scale_multiplier=scale_multiplier,
+            opacity_weighted=opacity_weighted,
+            anisotropic_radii=anisotropic_radii,
         )
 
     @torch.no_grad()

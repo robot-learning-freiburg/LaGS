@@ -37,6 +37,39 @@
   <sub>Qualitative nuScenes sequence: ground truth, LaGS, and SGE.</sub>
 </p>
 
+## Updates
+
+- **2026-10 — Faster Gaussian aggregation.** The `vsplat3d` Gaussian-to-voxel
+  aggregation kernels now follow the brick-based pipeline of
+  [S2GO](https://arxiv.org/abs/2506.05473) (Sec. 3.4.3), with a re-parallelized
+  backward pass and less per-step overhead: at S2GO scale (9k Gaussians, 640k
+  voxels, 18 channels) a forward+backward pass takes 8.6 ms instead of 31.3 ms on an
+  RTX 4060 Ti. This update also fixes a double-counted determinant in the gradient of
+  the Gaussian scales, so training curves are not identical to earlier runs; training
+  with the updated code converges to the same results up to run-to-run variance. Two
+  opt-in options, both off by default, are new:
+  - opacity-weighted geometry estimation (S2GO Sec. 3.4.2):
+    `model.gaussian_aggregator_opacity_weighted=true` and
+    `model.losses.semantic_gauss.aggregation_opacity_weighted=true`,
+  - per-axis (anisotropic) splat radii:
+    `model.gaussian_aggregator_anisotropic_radii=true` and
+    `model.losses.semantic_gauss.aggregation_anisotropic_radii=true`.
+
+  The provided checkpoints are unaffected: their evaluation results match the
+  previous kernels within the run-to-run variation of the evaluation itself. The
+  code as originally released remains available under the
+  [`lags/v1.0`](https://github.com/robot-learning-freiburg/LaGS/tree/lags/v1.0) and
+  [`sge/v1.0`](https://github.com/robot-learning-freiburg/LaGS/tree/sge/v1.0) tags.
+- **2026-09 — SGE is an IROS 2026 Best Paper Finalist.** 🏆
+  [SGE](https://arxiv.org/abs/2606.30754) was selected as a finalist for the Best
+  Paper Award at IROS 2026.
+- **2026-09 — Code and model release.** Code for LaGS (RA-L 2026) and SGE
+  (IROS 2026), tagged
+  [`lags/v1.0`](https://github.com/robot-learning-freiburg/LaGS/tree/lags/v1.0) and
+  [`sge/v1.0`](https://github.com/robot-learning-freiburg/LaGS/tree/sge/v1.0),
+  together with trained models and initialization weights; see the
+  [Model Zoo](docs/ModelZoo.md).
+
 ## Overview
 
 This repository provides a camera-based framework for **4D panoptic occupancy

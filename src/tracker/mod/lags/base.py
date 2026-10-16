@@ -447,6 +447,18 @@ class LatentGaussianOccupancyTracker(Base):
         scale_multiplier = self.conf.get("gaussian_aggregator_scale", 3.0)
         min_radius = self.conf.get("gaussian_aggregator_min_radius", 1)
 
+        # S2GO-style opacity-weighted geometry: alpha = a * exp(...) rather than exp(...)
+        # alone, so that the occupancy loss can suppress a gaussian via its opacity.
+        # Defaults off: opt in explicitly, so existing configs keep GaussianFormer-2
+        # behaviour.
+        opacity_weighted = self.conf.get("gaussian_aggregator_opacity_weighted", False)
+
+        # Tight per-axis splat extents (see ops/vsplat3d). Slightly output-changing
+        # (beyond-3-sigma tails of the narrow axes), so also opt-in.
+        anisotropic_radii = self.conf.get(
+            "gaussian_aggregator_anisotropic_radii", False
+        )
+
         # Choose aggregator based on aggregation mode
         if (
             self.gaussian_aggregation_mode == "hierarchical"
@@ -461,6 +473,8 @@ class LatentGaussianOccupancyTracker(Base):
                 fusion_mode=self.conf.gaussian_aggregator_fusion,
                 num_channels=self.voxel_transformer.embed_dim,
                 min_radius=min_radius,
+                opacity_weighted=opacity_weighted,
+                anisotropic_radii=anisotropic_radii,
             )
         else:
             # Single-stream aggregation (used for non-hierarchical or merged mode)
@@ -469,6 +483,8 @@ class LatentGaussianOccupancyTracker(Base):
                 voxel_range=self.voxel_range,
                 scale_multiplier=scale_multiplier,
                 min_radius=min_radius,
+                opacity_weighted=opacity_weighted,
+                anisotropic_radii=anisotropic_radii,
             )
 
         self.voxel_fuse = nn.Sequential(

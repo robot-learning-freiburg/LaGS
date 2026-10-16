@@ -288,6 +288,8 @@ class SemanticGaussianLoss(nn.Module):
         mask_weights: float = 0.0,
         aggregation_opacity_mode: str = "decoded",
         aggregation_opacity_threshold: float = 0.0,
+        aggregation_opacity_weighted: bool = False,
+        aggregation_anisotropic_radii: bool = False,
         query_dim: int = 256,
         opacity_head_layers: int = 1,
     ):
@@ -318,6 +320,8 @@ class SemanticGaussianLoss(nn.Module):
             voxel_size=voxel_size,
             voxel_range=voxel_range,
             scale_multiplier=scale_multiplier,
+            opacity_weighted=aggregation_opacity_weighted,
+            anisotropic_radii=aggregation_anisotropic_radii,
         )
 
         # Store voxel configuration for distance field sampling

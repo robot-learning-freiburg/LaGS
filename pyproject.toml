@@ -71,7 +71,7 @@ wandb = ["wandb"]
 [dependency-groups]
 # Dev tooling, installed by default on `uv sync` (uv installs the `dev` group
 # unless told otherwise). Mirrors the old `pip install .[dev]`.
-dev = ["black", "isort", "pre-commit", "pylint"]
+dev = ["black", "isort", "pre-commit", "pylint", "pytest"]
 
 [build-system]
 requires = ["setuptools", "wheel"]
@@ -170,6 +170,11 @@ requires-dist = [
 
 [tool.isort]
 profile = "black"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The cuda ops need a GPU; tests that require one skip themselves when absent.
+addopts = "--import-mode=importlib"
 
 [tool.pylint.MAIN]
 max-module-line = 2000
