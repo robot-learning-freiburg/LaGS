@@ -3477,6 +3477,13 @@ class LatentGaussianOccupancyTracker(Base):
 
         return loss
 
+    def on_before_optimizer_step(self, optimizer) -> None:
+        # NOTE: Lightning only clips automatically in automatic optimization.
+        # This hook runs inside `optimizer.step()`, after AMP has unscaled the
+        # gradients, so clipping here sees the true gradient norm.
+        if self.optimization_mode == "detached":
+            self.optimizer.clip_gradients(self, optimizer)
+
     def on_train_epoch_end(self) -> None:
         self.runtime_tracker.reset()
 
@@ -3721,11 +3728,10 @@ class Optimizer:
         # zero gradients
         optimizer.zero_grad()
 
-    def step(self, model: L.LightningModule) -> None:
-        optimizer = model.optimizers()
-        scheduler = model.lr_schedulers()
-
-        # perform gradient clipping, if specified
+    def clip_gradients(self, model: L.LightningModule, optimizer) -> None:
+        # NOTE: Must be called from `on_before_optimizer_step`. Clipping before
+        # `optimizer.step()` would act on gradients that are still scaled by
+        # the AMP grad scaler (16-mixed), which only unscales inside `step()`.
         if self.gradient_clip_algorithm is not None:
             model.clip_gradients(
                 optimizer,
@@ -3733,6 +3739,11 @@ class Optimizer:
                 gradient_clip_val=self.gradient_clip_val,
             )
 
-        # step the optimizer and LR-scheduler
+    def step(self, model: L.LightningModule) -> None:
+        optimizer = model.optimizers()
+        scheduler = model.lr_schedulers()
+
+        # step the optimizer and LR-scheduler; gradient clipping happens in
+        # the `on_before_optimizer_step` hook (see `clip_gradients`)
         optimizer.step()
         scheduler.step()
