@@ -39,6 +39,15 @@
 
 ## Updates
 
+- **2026-11 — Faster aggregation of high-dimensional features.** The `vsplat3d`
+  kernels now accumulate channels in groups of at most 32 and render each channel
+  group of a brick in its own thread block. This mainly speeds up the 256-channel
+  feature aggregation: with the Gaussians of a trained model, a forward / backward
+  pass of the op takes 14.9 / 43.8 ms instead of 57.2 / 129.9 ms on an RTX 4060 Ti.
+  The S2GO-scale benchmark below improves from 8.6 ms to 6.3 ms. Forward outputs are
+  bit-identical to the previous kernels, so the provided checkpoints are unaffected.
+  The compiled extension has to be rebuilt after updating.
+
 - **2026-10 — Faster Gaussian aggregation.** The `vsplat3d` Gaussian-to-voxel
   aggregation kernels now follow the brick-based pipeline of
   [S2GO](https://arxiv.org/abs/2506.05473) (Sec. 3.4.3), with a re-parallelized

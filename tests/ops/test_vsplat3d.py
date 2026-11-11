@@ -34,7 +34,12 @@ def _voxel_range(grid_size):
 
 
 def _voxel_centers(grid_size, voxel_range, device):
-    """All voxel centers, ordered to match the kernel's x * ny * nz + y * nz + z."""
+    """All voxel centers, x slowest and z fastest.
+
+    The kernel numbers voxels the other way round (x fastest, as the model's coordinate
+    grids are laid out); the order of the sample points is the caller's to choose and
+    nothing here depends on it.
+    """
     axes = [
         (torch.arange(n, device=device, dtype=torch.float32) + 0.5) * s + voxel_range[i]
         for i, (n, s) in enumerate(zip(grid_size, VOXEL_SIZE))
@@ -503,12 +508,12 @@ def test_grid_not_divisible_by_brick_edge(opacity_weighted):
 @pytest.mark.parametrize("num_channels", [33, 64, 300])
 @pytest.mark.parametrize("opacity_weighted", [True, False])
 def test_large_channel_counts(num_channels, opacity_weighted):
-    """Forward and backward beyond the 32-channel pair-parallel backward limit.
+    """Forward and backward with more channels than one channel group holds.
 
-    The other tests all use <= 32 channels, so without this the warp-per-gaussian
-    backward (33..256 channels; 33 exercises its partially-filled last lane pass, 64 a
-    full one) and the global-memory fallbacks past the largest templated channel count
-    (300) would be untested.
+    The kernels accumulate at most 32 channels at a time and split larger counts into
+    equally wide groups, each a pass of its own. The other tests all fit one group, so
+    without this the group loops would be untested: 33 channels run as 17 + 16, 64 as
+    two full groups, and 300 as ten groups of 30 on the 32-wide kernel.
     """
     # pylint: disable=too-many-locals
     scene = _make_scene(
@@ -551,6 +556,109 @@ def test_large_channel_counts(num_channels, opacity_weighted):
         torch.testing.assert_close(
             got, want, rtol=2e-3, atol=1e-5, msg=lambda m, n=name: f"{n} grad:\n{m}"
         )
+
+
+def _assert_matches_dense_reference(scene, opacity_weighted, seed):
+    """Forward outputs and all input gradients of the kernel vs the dense reference."""
+    # pylint: disable=too-many-locals
+    sem, occ, density, prob_sum = _call_kernel(scene, opacity_weighted)
+    ref_sem, ref_occ, ref_density, ref_prob_sum = _dense_reference(
+        scene, opacity_weighted
+    )
+
+    torch.testing.assert_close(sem[0], ref_sem, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(occ[0], ref_occ, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(density[0], ref_density, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(prob_sum[0], ref_prob_sum, rtol=1e-4, atol=1e-5)
+
+    gen = torch.Generator(device="cuda").manual_seed(seed)
+    n_pts = scene["sample_points"].shape[0]
+    n_ch = scene["semantics"].shape[1]
+
+    grad_sem = torch.randn(n_pts, n_ch, generator=gen, device="cuda")
+    grad_occ = torch.randn(n_pts, generator=gen, device="cuda")
+    grad_density = torch.randn(n_pts, generator=gen, device="cuda")
+
+    names = ["means", "icovs", "opacities", "semantics"]
+
+    def run(fn, batched):
+        scn = dict(scene)
+        for name in names:
+            scn[name] = scene[name].clone().requires_grad_(True)
+        outs = fn(scn)
+        outs = [o[0] for o in outs] if batched else outs
+        return _grads(
+            outs[:3], [scn[n] for n in names], [grad_sem, grad_occ, grad_density]
+        )
+
+    kernel_grads = run(lambda s: _call_kernel(s, opacity_weighted), batched=True)
+    ref_grads = run(lambda s: _dense_reference(s, opacity_weighted), batched=False)
+
+    for name, got, want in zip(names, kernel_grads, ref_grads):
+        torch.testing.assert_close(
+            got, want, rtol=2e-3, atol=1e-5, msg=lambda m, n=name: f"{n} grad:\n{m}"
+        )
+
+
+def _gaussians_per_brick(scene):
+    """How many gaussians' splats reach each 4x4x4 brick that holds a sample point."""
+    device = scene["means"].device
+
+    vr = torch.tensor(scene["voxel_range"], device=device)
+    vs = torch.tensor(VOXEL_SIZE, device=device)
+
+    bricks = ((scene["sample_points"] - vr[:3]) / vs).to(torch.int64) // 4
+    _, brick_ids = torch.unique(bricks, dim=0, return_inverse=True)
+
+    mask = _splat_mask(scene).to(torch.float32)  # [points, gaussians]
+    reached = torch.zeros(int(brick_ids.max()) + 1, mask.shape[1], device=device)
+    reached.index_add_(0, brick_ids, mask)
+
+    return (reached > 0).sum(dim=1)
+
+
+@requires_cuda
+@pytest.mark.parametrize("num_channels", [18, 40])
+def test_more_gaussians_per_brick_than_one_staging_chunk(num_channels):
+    """Bricks whose gaussian list does not fit the forward's staging area at once.
+
+    The forward stages a brick's gaussians through shared memory 64 at a time and
+    walks that list once per channel group. The other scenes stay below 64 gaussians
+    per brick, so this one packs them densely enough to need several chunks: with a
+    single channel group (18 channels) and with two (40), where the chunks are staged
+    all over again for the second group.
+    """
+    scene = _make_scene(
+        num_gaussians=200, grid_size=(16, 16, 8), num_channels=num_channels
+    )
+
+    assert _gaussians_per_brick(scene).max() > 64, "scene needs no second chunk"
+
+    _assert_matches_dense_reference(scene, opacity_weighted=False, seed=37)
+
+
+@requires_cuda
+def test_sample_points_on_part_of_the_grid():
+    """Sample points on a subset of the voxels, as callers pass under a mask.
+
+    The op does not initialise its outputs: it relies on every sample point being
+    written by a render kernel, while voxels -- and entire bricks -- without a sample
+    point are skipped. Here most voxels and a whole slab of bricks have none.
+    """
+    scene = _make_scene(num_gaussians=50, grid_size=(16, 16, 8), num_channels=18)
+    points = scene["sample_points"]
+
+    gen = torch.Generator(device="cuda").manual_seed(41)
+    keep = torch.rand(points.shape[0], generator=gen, device="cuda") < 0.4
+
+    # Clear the first brick along x everywhere, so some bricks see no point at all.
+    keep &= points[:, 0] > scene["voxel_range"][0] + 4 * VOXEL_SIZE[0]
+
+    scene["sample_points"] = points[keep]
+
+    assert 0 < scene["sample_points"].shape[0] < points.shape[0] // 2
+
+    _assert_matches_dense_reference(scene, opacity_weighted=False, seed=43)
 
 
 @requires_cuda
