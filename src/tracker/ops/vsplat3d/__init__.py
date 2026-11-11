@@ -195,6 +195,7 @@ class _AggregateFn(torch.autograd.Function):
             pair_gaussians,
             pair_bricks,
             pair_order,
+            voxel_to_point,
         ) = _aggregate_forward(
             sample_points,
             gaussian_means,
@@ -225,6 +226,8 @@ class _AggregateFn(torch.autograd.Function):
         ctx.opacity_weighted = opacity_weighted
         ctx.empty = False
 
+        # The pair list and the voxel-to-point map come back from the forward so that
+        # the backward can reuse them instead of rebuilding them.
         ctx.save_for_backward(
             pair_offsets,
             pair_gaussians,
@@ -232,9 +235,7 @@ class _AggregateFn(torch.autograd.Function):
             pair_order,
             gaussian_means_int,
             gaussian_radii,
-            gaussian_elements,
-            sample_points_int,
-            point_elements,
+            voxel_to_point,
             sample_points,
             gaussian_means,
             gaussian_icovs,
@@ -304,9 +305,7 @@ class _AggregateFn(torch.autograd.Function):
             pair_order,
             gaussian_means_int,
             gaussian_radii,
-            gaussian_elements,
-            sample_points_int,
-            point_elements,
+            voxel_to_point,
             sample_points,
             gaussian_means,
             gaussian_icovs,
@@ -329,10 +328,7 @@ class _AggregateFn(torch.autograd.Function):
             pair_order,
             gaussian_means_int,
             gaussian_radii,
-            gaussian_elements,
-            sample_points_int,
-            point_elements,
-            num_elements,
+            voxel_to_point,
             sample_points,
             gaussian_means,
             gaussian_icovs,

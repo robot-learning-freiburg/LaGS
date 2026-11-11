@@ -16,6 +16,7 @@ namespace vsplat3d
             torch::Tensor,
             torch::Tensor,
             torch::Tensor,
+            torch::Tensor,
             torch::Tensor>
         aggregate_forward(
             const torch::Tensor &sample_points,
@@ -43,10 +44,7 @@ namespace vsplat3d
             const torch::Tensor &pair_order,
             const torch::Tensor &gaussian_means_int,
             const torch::Tensor &gaussian_radii,
-            const torch::Tensor &gaussian_elements,
-            const torch::Tensor &sample_points_int,
-            const torch::Tensor &point_elements,
-            const int64_t num_elements,
+            const torch::Tensor &voxel_to_point,
             const torch::Tensor &sample_points,
             const torch::Tensor &gaussian_means,
             const torch::Tensor &gaussian_icovs,
