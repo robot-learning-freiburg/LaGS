@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <tuple>
 #include <vector>
 
@@ -95,9 +96,9 @@ constexpr int num_geometry_grads = 10;
 // accumulators -- one set per voxel in the forward, one per gaussian-brick pair in the
 // backward -- stay in registers whatever the channel count; arrays that do not fit
 // there cost nearly twice as much per channel as repeating the per-gaussian geometry
-// once per group does. Measured on an RTX 4060 Ti, 32 is the sweet spot both ways:
-// narrower groups repeat the geometry more often, wider ones gain nothing in the
-// forward and lose occupancy to their register footprint in the backward.
+// once per group does. Measured on an RTX 4060 Ti and an L40S, 32 is the sweet spot
+// both ways: narrower groups repeat the geometry more often, wider ones gain nothing
+// in the forward and lose occupancy to their register footprint in the backward.
 constexpr int max_group_channels = 32;
 
 template<typename T>
@@ -305,19 +306,31 @@ __global__ void compute_voxel_to_point_map(
     }
 }
 
-// Renders one brick per thread block, one thread per voxel. All voxels of a brick walk
-// the same gaussian list, staged through shared memory one block-sized chunk at a time.
+// Renders the bricks, one thread per voxel. All voxels of a brick walk the same gaussian
+// list, staged through shared memory one block-sized chunk at a time.
 //
-// Channels are accumulated one group at a time (see max_group_channels), walking the
-// brick's gaussian list once per group. Every pass repeats the same operations in the
-// same order, so the geometry -- and with it prob_sum, which normalises each group --
-// comes out identical in all of them, and the result matches accumulating all channels
-// in a single pass bit for bit.
+// Channels are accumulated one group at a time (see max_group_channels), and each
+// (brick, channel group) pair is a work item with a thread block of its own. Every item
+// of a brick walks its gaussian list with the same operations in the same order, so the
+// geometry -- and with it prob_sum, which normalises each group -- comes out identical
+// in all of them, and the result matches accumulating all channels in a single pass bit
+// for bit.
+//
+// The groups of a brick are separate items rather than a loop inside one block because
+// bricks are filled very unevenly (with the gaussians of a trained model, the fullest
+// holds 14 to 24 times the average) and a block walks its list sequentially. A GPU with
+// many SMs finishes most bricks quickly and then waits for the fullest ones, and a loop
+// over the groups makes that wait as many times longer as there are groups. Measured
+// with such gaussians at 256 channels, the forward took 8.0 ms with the loop and 4.6 ms
+// with items on an L40S (142 SMs), and the same either way on an RTX 4060 Ti (34 SMs).
+// Items are numbered brick-major, which measured the same as or better than
+// group-major.
 template <typename index_t, typename float_t, typename data_t, int GROUP>
 __global__ void render_forward_bricks(
     index_t const num_keys,
     index_t const num_channels,
     index_t const group_channels,  // channels per group (must be >= 1 and <= GROUP)
+    index_t const num_groups,  // channel groups per brick (must be >= 1)
     float_t const* __restrict__ sample_points,
     float_t const* __restrict__ gaussian_means,
     float_t const* __restrict__ gaussian_icovs,
@@ -350,7 +363,14 @@ __global__ void render_forward_bricks(
 
     auto const tid = static_cast<index_t>(threadIdx.x);
 
-    for (index_t key = blockIdx.x; key < num_keys; key += gridDim.x) {
+    auto const num_items = num_keys * num_groups;
+
+    for (index_t item = blockIdx.x; item < num_items; item += gridDim.x) {
+        auto const key = item / num_groups;
+        auto const group_start = (item % num_groups) * group_channels;
+        auto const group_left = num_channels - group_start;
+        auto const group_size = group_left < group_channels ? group_left : group_channels;
+
         auto const element = key / bricks_per_element;
         auto const brick = grid_position(key % bricks_per_element, brick_grid);
         auto const voxel = brick_voxel(brick, tid);
@@ -377,127 +397,118 @@ __global__ void render_forward_bricks(
             ? math::vec3<float_t>::load(sample_points + 3 * pts_idx)
             : math::vec3<float_t>::zero();
 
-        // One pass over the brick's gaussians per channel group. A do-while, because
-        // the first pass also writes the geometry outputs and so has to run even if
-        // there are no channels at all. All loop bounds are block-uniform, which keeps
-        // the barriers inside aligned across the block.
-        index_t group_start = 0;
-        do {
-            auto const group_left = num_channels - group_start;
-            auto const group_size = group_left < group_channels ? group_left : group_channels;
+        data_t semantics[GROUP];
 
-            data_t semantics[GROUP];
+        #pragma unroll
+        for (int ch = 0; ch < GROUP; ch++) {
+            semantics[ch] = data_t{0};
+        }
+
+        float_t occupancy = 1.0;
+        float_t density = 0.0;
+        float_t prob_sum = 0.0;
+
+        // The loop bounds are block-uniform, which keeps the barriers inside aligned
+        // across the block.
+        for (auto chunk = range_start; chunk < range_end; chunk += brick_volume) {
+            if (chunk + tid < range_end) {
+                auto const gs_idx = pair_gaussians[pair_order[chunk + tid]];
+
+                staged_index[tid] = gs_idx;
+                staged_opacity[tid] = gaussian_opacities[gs_idx];
+
+                for (int k = 0; k < 3; k++) {
+                    staged_mean[k][tid] = gaussian_means[3 * gs_idx + k];
+                    staged_cell[k][tid] = gaussian_cells[3 * gs_idx + k];
+                    staged_radius[k][tid] = gaussian_radii[3 * gs_idx + k];
+                }
+
+                auto const staged_cov = math::smat3<float_t>::load(
+                    gaussian_icovs + 6 * gs_idx);
+
+                staged_icov[0][tid] = staged_cov.a11;
+                staged_icov[1][tid] = staged_cov.a22;
+                staged_icov[2][tid] = staged_cov.a33;
+                staged_icov[3][tid] = staged_cov.a12;
+                staged_icov[4][tid] = staged_cov.a23;
+                staged_icov[5][tid] = staged_cov.a13;
+
+                // Computed once per gaussian per brick rather than per voxel: every
+                // thread of the block would otherwise redo the same determinant.
+                staged_idet[tid] = staged_cov.det();
+            }
+            __syncthreads();
+
+            auto const num_left = range_end - chunk;
+            auto const num_staged = num_left < static_cast<index_t>(brick_volume)
+                ? num_left : static_cast<index_t>(brick_volume);
+
+            if (pts_idx >= 0) {
+                for (index_t j = 0; j < num_staged; j++) {
+                    // The pair list is brick-level, so re-check per-voxel coverage.
+                    auto const cell = math::vec3<index_t>{
+                        staged_cell[0][j], staged_cell[1][j], staged_cell[2][j]};
+                    auto const radius = math::vec3<index_t>{
+                        staged_radius[0][j], staged_radius[1][j], staged_radius[2][j]};
+
+                    if (!splat_covers(cell, radius, voxel))
+                        continue;
+
+                    auto const mean = math::vec3<float_t>{
+                        staged_mean[0][j], staged_mean[1][j], staged_mean[2][j]};
+
+                    // Field order matches smat3::load: a11, a22, a33, a12, a23, a13.
+                    auto const cov = math::smat3<float_t>{
+                        staged_icov[0][j], staged_icov[1][j], staged_icov[2][j],
+                        staged_icov[3][j], staged_icov[4][j], staged_icov[5][j]};
+
+                    auto const deter = staged_idet[j];
+                    auto const opacity = staged_opacity[j];
+
+                    auto const power = __expf(cov.neg_half_quadratic(mean - point));
+                    auto const denom = static_cast<float_t>(gauss_denom_pi) * __fsqrt_rn(deter);
+                    auto const prob = opacity * denom * power;
+
+                    // Opacity-weighted geometry: alpha = a * exp(-1/2 (x-m)^T S^-1 (x-m)).
+                    // Without the weighting, occupancy cannot see opacity at all, so the
+                    // only way to suppress a gaussian is to move/shrink it.
+                    auto const alpha = opacity_weighted ? opacity * power : power;
+
+                    auto const sem_base = staged_index[j] * num_channels + group_start;
+
+                    #pragma unroll
+                    for (int ch = 0; ch < GROUP; ch++) {
+                        if (ch < group_size) {
+                            semantics[ch] += gaussian_semantics[sem_base + ch] * static_cast<data_t>(prob);
+                        }
+                    }
+
+                    occupancy = (1 - alpha) * occupancy;
+                    density = alpha + density;
+                    prob_sum = prob + prob_sum;
+                }
+            }
+            __syncthreads();
+        }
+
+        if (pts_idx >= 0) {
+            auto const valid = prob_sum > epsilon<float_t>;
+            auto const out_sem = out_semantics + pts_idx * num_channels + group_start;
 
             #pragma unroll
             for (int ch = 0; ch < GROUP; ch++) {
-                semantics[ch] = data_t{0};
-            }
-
-            float_t occupancy = 1.0;
-            float_t density = 0.0;
-            float_t prob_sum = 0.0;
-
-            for (auto chunk = range_start; chunk < range_end; chunk += brick_volume) {
-                if (chunk + tid < range_end) {
-                    auto const gs_idx = pair_gaussians[pair_order[chunk + tid]];
-
-                    staged_index[tid] = gs_idx;
-                    staged_opacity[tid] = gaussian_opacities[gs_idx];
-
-                    for (int k = 0; k < 3; k++) {
-                        staged_mean[k][tid] = gaussian_means[3 * gs_idx + k];
-                        staged_cell[k][tid] = gaussian_cells[3 * gs_idx + k];
-                        staged_radius[k][tid] = gaussian_radii[3 * gs_idx + k];
-                    }
-
-                    auto const staged_cov = math::smat3<float_t>::load(
-                        gaussian_icovs + 6 * gs_idx);
-
-                    staged_icov[0][tid] = staged_cov.a11;
-                    staged_icov[1][tid] = staged_cov.a22;
-                    staged_icov[2][tid] = staged_cov.a33;
-                    staged_icov[3][tid] = staged_cov.a12;
-                    staged_icov[4][tid] = staged_cov.a23;
-                    staged_icov[5][tid] = staged_cov.a13;
-
-                    // Computed once per gaussian per brick rather than per voxel: every
-                    // thread of the block would otherwise redo the same determinant.
-                    staged_idet[tid] = staged_cov.det();
-                }
-                __syncthreads();
-
-                auto const num_left = range_end - chunk;
-                auto const num_staged = num_left < static_cast<index_t>(brick_volume)
-                    ? num_left : static_cast<index_t>(brick_volume);
-
-                if (pts_idx >= 0) {
-                    for (index_t j = 0; j < num_staged; j++) {
-                        // The pair list is brick-level, so re-check per-voxel coverage.
-                        auto const cell = math::vec3<index_t>{
-                            staged_cell[0][j], staged_cell[1][j], staged_cell[2][j]};
-                        auto const radius = math::vec3<index_t>{
-                            staged_radius[0][j], staged_radius[1][j], staged_radius[2][j]};
-
-                        if (!splat_covers(cell, radius, voxel))
-                            continue;
-
-                        auto const mean = math::vec3<float_t>{
-                            staged_mean[0][j], staged_mean[1][j], staged_mean[2][j]};
-
-                        // Field order matches smat3::load: a11, a22, a33, a12, a23, a13.
-                        auto const cov = math::smat3<float_t>{
-                            staged_icov[0][j], staged_icov[1][j], staged_icov[2][j],
-                            staged_icov[3][j], staged_icov[4][j], staged_icov[5][j]};
-
-                        auto const deter = staged_idet[j];
-                        auto const opacity = staged_opacity[j];
-
-                        auto const power = __expf(cov.neg_half_quadratic(mean - point));
-                        auto const denom = static_cast<float_t>(gauss_denom_pi) * __fsqrt_rn(deter);
-                        auto const prob = opacity * denom * power;
-
-                        // Opacity-weighted geometry: alpha = a * exp(-1/2 (x-m)^T S^-1 (x-m)).
-                        // Without the weighting, occupancy cannot see opacity at all, so the
-                        // only way to suppress a gaussian is to move/shrink it.
-                        auto const alpha = opacity_weighted ? opacity * power : power;
-
-                        auto const sem_base = staged_index[j] * num_channels + group_start;
-
-                        #pragma unroll
-                        for (int ch = 0; ch < GROUP; ch++) {
-                            if (ch < group_size) {
-                                semantics[ch] += gaussian_semantics[sem_base + ch] * static_cast<data_t>(prob);
-                            }
-                        }
-
-                        occupancy = (1 - alpha) * occupancy;
-                        density = alpha + density;
-                        prob_sum = prob + prob_sum;
-                    }
-                }
-                __syncthreads();
-            }
-
-            if (pts_idx >= 0) {
-                auto const valid = prob_sum > epsilon<float_t>;
-                auto const out_sem = out_semantics + pts_idx * num_channels + group_start;
-
-                #pragma unroll
-                for (int ch = 0; ch < GROUP; ch++) {
-                    if (ch < group_size) {
-                        out_sem[ch] = valid ? (semantics[ch] / static_cast<data_t>(prob_sum)) : default_value;
-                    }
-                }
-
-                if (group_start == 0) {
-                    out_occupancy[pts_idx] = 1 - occupancy;
-                    out_density[pts_idx] = density;
-                    out_probability[pts_idx] = prob_sum;
+                if (ch < group_size) {
+                    out_sem[ch] = valid ? (semantics[ch] / static_cast<data_t>(prob_sum)) : default_value;
                 }
             }
 
-            group_start += group_channels;
-        } while (group_start < num_channels);
+            // The geometry is the same in all groups of a brick; the first writes it.
+            if (group_start == 0) {
+                out_occupancy[pts_idx] = 1 - occupancy;
+                out_density[pts_idx] = density;
+                out_probability[pts_idx] = prob_sum;
+            }
+        }
     }
 }
 
@@ -1223,11 +1234,22 @@ render_forward(
 
     auto const group_channels = static_cast<int>(channel_group_width(num_channels));
 
+    // One thread block per (brick, channel group). At least one group, so that the
+    // geometry outputs get written even when there are no channels at all.
+    auto const num_groups = std::max<int64_t>(
+        (static_cast<int64_t>(num_channels) + group_channels - 1) / group_channels, 1);
+    auto const num_blocks = static_cast<int64_t>(num_keys) * num_groups;
+
+    TORCH_CHECK(
+        num_blocks <= std::numeric_limits<index_t>::max(),
+        "too many bricks and channel groups for a single launch: ", num_blocks);
+
     dispatch_kernel<ForwardKernelWrapper<index_t, float_t, data_t>, GroupChannels>(
-        group_channels, num_keys, kernel::brick_volume, stream,
+        group_channels, static_cast<unsigned int>(num_blocks), kernel::brick_volume, stream,
         num_keys,
         num_channels,
         static_cast<index_t>(group_channels),
+        static_cast<index_t>(num_groups),
         sample_points.template const_data_ptr<float_t>(),
         gaussian_means.template const_data_ptr<float_t>(),
         gaussian_icovs.template const_data_ptr<float_t>(),
